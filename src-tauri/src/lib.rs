@@ -3,14 +3,13 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use std::{
     ffi::CString,
-    path::Path,
     sync::atomic::{AtomicBool, Ordering},
     thread::JoinHandle,
     time::Instant,
 };
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
