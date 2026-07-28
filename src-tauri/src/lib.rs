@@ -2545,6 +2545,8 @@ fn is_pet_visible(app: AppHandle) -> Result<bool, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let repository =
                 create_reminder_repository(app.handle()).map_err(std::io::Error::other)?;
@@ -2638,10 +2640,8 @@ mod tests {
 
     #[test]
     fn allows_partial_local_character_packs() {
-        let root = std::env::temp_dir().join(format!(
-            "baalert-draft-character-{}",
-            current_time_millis()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("baalert-draft-character-{}", current_time_millis()));
         fs::create_dir_all(root.join("idle")).unwrap();
         fs::write(
             root.join("idle").join("0000.png"),

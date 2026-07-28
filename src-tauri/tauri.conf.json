@@ -27,8 +27,12 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "resources": {
       "resources/character": "character"
+    },
+    "macOS": {
+      "signingIdentity": "-"
     },
     "icon": [
       "icons/32x32.png",
@@ -37,5 +41,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERCRDJCNjgyREZFQkM0NTcKUldSWHhPdmZncmJTMnppbVZYZkQrQk05R0xIZmFpRDNJZi8zTWJ0QzM3eTBidWNUdmlKSzRHU2kK",
+      "endpoints": [
+        "https://github.com/Dewakd/baalert-reminder-app/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

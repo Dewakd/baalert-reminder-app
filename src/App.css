@@ -358,7 +358,8 @@ textarea:focus-visible,
 .placeholder-card,
 .reminder-editor,
 .pet-size-tool,
-.bubble-style-tool {
+.bubble-style-tool,
+.app-update-tool {
   border: var(--border);
   border-radius: 6px;
   box-shadow: var(--shadow);
@@ -1434,6 +1435,144 @@ textarea:focus-visible,
 
 .bubble-style-tool {
   border-top: 12px solid var(--pink);
+}
+
+.app-update-tool {
+  grid-column: 1 / -1;
+  padding: 19px;
+  background: var(--white);
+  border-top: 12px solid var(--cyan);
+}
+
+.app-update-heading,
+.app-update-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.app-update-heading h2 {
+  font-size: 20px;
+  font-weight: 900;
+}
+
+.app-update-heading p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.update-state {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  background: var(--yellow);
+  border: var(--small-border);
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.update-state.available,
+.update-state.latest {
+  background: var(--lime);
+}
+
+.update-state.downloading,
+.update-state.checking,
+.update-state.restarting {
+  background: var(--cyan);
+}
+
+.update-state.error,
+.update-error {
+  background: var(--red);
+}
+
+.update-release,
+.update-error {
+  margin-top: 14px;
+  padding: 12px;
+  border: var(--small-border);
+  border-radius: 3px;
+}
+
+.update-release {
+  background: var(--paper);
+}
+
+.update-release strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.update-release p {
+  margin-top: 5px;
+  color: var(--body-text);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.45;
+  white-space: pre-line;
+}
+
+.update-error {
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.update-progress {
+  height: 18px;
+  margin-top: 14px;
+  overflow: hidden;
+  background: var(--paper);
+  border: var(--small-border);
+  border-radius: 2px;
+}
+
+.update-progress span {
+  display: block;
+  height: 100%;
+  background: var(--lime);
+  border-right: var(--small-border);
+  transition: width 120ms linear;
+}
+
+.app-update-actions {
+  margin-top: 15px;
+}
+
+.app-update-actions button {
+  min-height: 38px;
+  padding: 8px 12px;
+  color: var(--ink);
+  border: var(--small-border);
+  border-radius: 3px;
+  box-shadow: 3px 3px 0 var(--shadow-ink);
+  font-size: 9px;
+  font-weight: 900;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+
+.app-update-actions .release-history-button {
+  background: var(--paper);
+}
+
+.app-update-actions button {
+  background: var(--lime);
+}
+
+.app-update-actions button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.app-update-actions button:active:not(:disabled) {
+  box-shadow: 1px 1px 0 var(--shadow-ink);
+  transform: translate(2px, 2px);
 }
 
 .pet-size-preview {

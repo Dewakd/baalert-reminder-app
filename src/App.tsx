@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import "./App.css";
 import petIdle from "../src-tauri/resources/character/idle/Front_Idle_01.png";
 
@@ -604,6 +608,148 @@ function RemindersPage({
   );
 }
 
+type UpdateStatus =
+  | "idle"
+  | "checking"
+  | "available"
+  | "latest"
+  | "downloading"
+  | "restarting"
+  | "error";
+
+function AppUpdateTool() {
+  const [currentVersion, setCurrentVersion] = useState("0.1.0");
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const [status, setStatus] = useState<UpdateStatus>("idle");
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    void getVersion().then(setCurrentVersion).catch(() => undefined);
+  }, []);
+
+  async function handleCheckForUpdates() {
+    setStatus("checking");
+    setError("");
+    setProgress(0);
+
+    try {
+      const update = await check({ timeout: 20_000 });
+      setAvailableUpdate(update);
+      setStatus(update ? "available" : "latest");
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(
+        message.includes("404")
+          ? "No published Baalert release is available yet."
+          : message,
+      );
+      setStatus("error");
+    }
+  }
+
+  async function handleInstallUpdate() {
+    if (!availableUpdate) return;
+
+    setStatus("downloading");
+    setError("");
+    setProgress(0);
+    let downloaded = 0;
+    let total = 0;
+
+    try {
+      await availableUpdate.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength ?? 0;
+        } else if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+          if (total > 0) {
+            setProgress(Math.min(100, Math.round((downloaded / total) * 100)));
+          }
+        } else {
+          setProgress(100);
+        }
+      });
+      setStatus("restarting");
+      await relaunch();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setStatus("error");
+    }
+  }
+
+  const busy = status === "checking" || status === "downloading" || status === "restarting";
+
+  return (
+    <section className="app-update-tool">
+      <div className="app-update-heading">
+        <div>
+          <h2>App updates</h2>
+          <p>Current version v{currentVersion}</p>
+        </div>
+        <span className={`update-state ${status}`}>
+          {status === "checking" && "Checking"}
+          {status === "available" && `v${availableUpdate?.version} ready`}
+          {status === "latest" && "Up to date"}
+          {status === "downloading" && `${progress}%`}
+          {status === "restarting" && "Restarting"}
+          {status === "error" && "Check failed"}
+          {status === "idle" && "Stable channel"}
+        </span>
+      </div>
+
+      {availableUpdate && status === "available" && (
+        <div className="update-release">
+          <strong>Baalert v{availableUpdate.version}</strong>
+          <p>{availableUpdate.body?.trim() || "A new version is ready to install."}</p>
+        </div>
+      )}
+
+      {status === "downloading" && (
+        <div
+          className="update-progress"
+          role="progressbar"
+          aria-label="Downloading update"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={progress}
+        >
+          <span style={{ width: `${Math.max(3, progress)}%` }} />
+        </div>
+      )}
+
+      {error && <div className="update-error">{error}</div>}
+
+      <div className="app-update-actions">
+        <button
+          className="release-history-button"
+          type="button"
+          onClick={() =>
+            void openUrl(
+              "https://github.com/Dewakd/baalert-reminder-app/releases",
+            )
+          }
+        >
+          Release history
+        </button>
+        {availableUpdate && status === "available" ? (
+          <button type="button" onClick={() => void handleInstallUpdate()}>
+            Download and restart
+          </button>
+        ) : (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void handleCheckForUpdates()}
+          >
+            {status === "checking" ? "Checking..." : "Check for updates"}
+          </button>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function SettingsPage({
   petSize,
   bubbleStyle,
@@ -916,6 +1062,8 @@ function SettingsPage({
           ))}
         </div>
       </section>
+
+      <AppUpdateTool />
 
       <section className="character-library-tool">
         <div className="character-library-heading">
