@@ -21,6 +21,12 @@ use tauri::webview::WebviewWindowBuilder;
 use tauri::WebviewUrl;
 use tauri::{AppHandle, Manager, State};
 
+#[cfg(target_os = "windows")]
+#[link(name = "User32")]
+extern "system" {
+    fn GetAsyncKeyState(v_key: i32) -> i16;
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Reminder {
@@ -2635,6 +2641,18 @@ fn open_dashboard(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn is_primary_mouse_button_pressed() -> Option<bool> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        const VK_LBUTTON: i32 = 0x01;
+        return Some(GetAsyncKeyState(VK_LBUTTON) < 0);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    None
+}
+
+#[tauri::command]
 async fn hide_pet(app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -2693,6 +2711,7 @@ pub fn run() {
             hide_pet,
             is_pet_visible,
             open_dashboard,
+            is_primary_mouse_button_pressed,
             list_reminders,
             create_reminder,
             set_reminder_enabled,

@@ -145,7 +145,13 @@ function PetOverlay() {
   >();
   const dragging = useRef(false);
   const movedDuringDrag = useRef(false);
-  const lastWindowX = useRef<number | undefined>(undefined);
+  const lastWindowPosition = useRef<{ x: number; y: number } | undefined>(
+    undefined,
+  );
+  const dragOriginPosition = useRef<{ x: number; y: number } | undefined>(
+    undefined,
+  );
+  const releasePollTimer = useRef<number | undefined>(undefined);
 
   const motion: PetMotion =
     interactionMotion ?? (bubbleVisible ? "reminder" : "idle");
@@ -233,8 +239,13 @@ function PetOverlay() {
   const finishDrag = useCallback((openOnClick = true) => {
     if (!dragging.current) return;
 
+    if (releasePollTimer.current !== undefined) {
+      window.clearTimeout(releasePollTimer.current);
+      releasePollTimer.current = undefined;
+    }
     const shouldOpenDashboard = openOnClick && !movedDuringDrag.current;
     dragging.current = false;
+    dragOriginPosition.current = undefined;
     setInteractionMotion(undefined);
     if (shouldOpenDashboard) void invoke("open_dashboard");
   }, []);
@@ -250,6 +261,9 @@ function PetOverlay() {
       window.removeEventListener("pointerup", handlePointerUp);
       window.removeEventListener("mouseup", handlePointerUp);
       window.removeEventListener("pointercancel", handlePointerCancel);
+      if (releasePollTimer.current !== undefined) {
+        window.clearTimeout(releasePollTimer.current);
+      }
     };
   }, [finishDrag]);
 
@@ -261,22 +275,29 @@ function PetOverlay() {
     void appWindow
       .outerPosition()
       .then((position) => {
-        lastWindowX.current = position.x;
+        lastWindowPosition.current = { x: position.x, y: position.y };
       })
       .catch(() => undefined);
 
     void appWindow
       .onMoved(({ payload: position }) => {
         if (!dragging.current) {
-          lastWindowX.current = position.x;
+          lastWindowPosition.current = { x: position.x, y: position.y };
           return;
         }
 
-        const previousX = lastWindowX.current;
-        lastWindowX.current = position.x;
-        movedDuringDrag.current = true;
-        if (previousX === undefined || position.x === previousX) return;
-        setInteractionMotion(position.x < previousX ? "runLeft" : "runRight");
+        const previous = lastWindowPosition.current;
+        const origin = dragOriginPosition.current ?? previous ?? position;
+        dragOriginPosition.current = { x: origin.x, y: origin.y };
+        lastWindowPosition.current = { x: position.x, y: position.y };
+
+        const distance = Math.hypot(
+          position.x - origin.x,
+          position.y - origin.y,
+        );
+        if (distance >= 8) movedDuringDrag.current = true;
+        if (!previous || position.x === previous.x) return;
+        setInteractionMotion(position.x < previous.x ? "runLeft" : "runRight");
       })
       .then((stopListening) => {
         if (cancelled) {
@@ -294,13 +315,30 @@ function PetOverlay() {
   }, [appWindow]);
 
   const startDrag = () => {
-    if (!appWindow) return;
+    if (!appWindow || dragging.current) return;
 
     dragging.current = true;
     movedDuringDrag.current = false;
+    dragOriginPosition.current = lastWindowPosition.current
+      ? { ...lastWindowPosition.current }
+      : undefined;
     setInteractionMotion("runRight");
 
+    const watchForRelease = () => {
+      void invoke<boolean | null>("is_primary_mouse_button_pressed")
+        .then((pressed) => {
+          if (!dragging.current || pressed === null) return;
+          if (!pressed) {
+            finishDrag();
+            return;
+          }
+          releasePollTimer.current = window.setTimeout(watchForRelease, 40);
+        })
+        .catch(() => undefined);
+    };
+
     void appWindow.startDragging().catch(() => finishDrag(false));
+    releasePollTimer.current = window.setTimeout(watchForRelease, 40);
   };
 
   return (
