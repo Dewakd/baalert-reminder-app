@@ -1,21 +1,346 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import "./App.css";
 import petIdle from "../src-tauri/resources/character/idle/Front_Idle_01.png";
 
-// Fallback overlay used on platforms that do not use the native macOS panel.
+type PetOverlayPayload = {
+  title: string;
+  message: string;
+  showAfterSeconds: number;
+  visibleForSeconds: number;
+  showBubble: boolean;
+  petSize: number;
+  bubbleStyle: BubbleStyle;
+  reminderAnimation: string;
+  darkMode: boolean;
+};
+
+type PetOverlayFrameSet = {
+  idle: string[];
+  runLeft: string[];
+  runRight: string[];
+  hover: string[];
+  reminder: string[];
+};
+
+type PetMotion = "idle" | "runLeft" | "runRight" | "hover" | "reminder";
+
+const DEFAULT_PET_OVERLAY: PetOverlayPayload = {
+  title: "Baalert reminder",
+  message: "You have something coming up soon.",
+  showAfterSeconds: 0,
+  visibleForSeconds: 10,
+  showBubble: true,
+  petSize: 152,
+  bubbleStyle: "lime",
+  reminderAnimation: "idle",
+  darkMode: false,
+};
+
+function bundledFrames(modules: Record<string, unknown>) {
+  return Object.entries(modules)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, source]) => source as string);
+}
+
+const BUNDLED_IDLE_FRAMES = bundledFrames(
+  import.meta.glob("../src-tauri/resources/character/idle/*.png", {
+    eager: true,
+    query: "?url",
+    import: "default",
+  }),
+);
+const BUNDLED_RUN_LEFT_FRAMES = bundledFrames(
+  import.meta.glob("../src-tauri/resources/character/run-left/*.png", {
+    eager: true,
+    query: "?url",
+    import: "default",
+  }),
+);
+const BUNDLED_RUN_RIGHT_FRAMES = bundledFrames(
+  import.meta.glob("../src-tauri/resources/character/run-right/*.png", {
+    eager: true,
+    query: "?url",
+    import: "default",
+  }),
+);
+
+function readPetOverlayPayload(): PetOverlayPayload {
+  const encoded = new URLSearchParams(window.location.search).get("payload");
+  if (!encoded) return DEFAULT_PET_OVERLAY;
+
+  try {
+    const standardBase64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = standardBase64.padEnd(
+      standardBase64.length + ((4 - (standardBase64.length % 4)) % 4),
+      "=",
+    );
+    const binary = window.atob(padded);
+    const bytes = Uint8Array.from(binary, (character) =>
+      character.charCodeAt(0),
+    );
+    const parsed = JSON.parse(new TextDecoder().decode(bytes));
+    const bubbleStyle = ["lime", "pink", "yellow", "cyan"].includes(
+      parsed.bubbleStyle,
+    )
+      ? parsed.bubbleStyle
+      : DEFAULT_PET_OVERLAY.bubbleStyle;
+
+    return {
+      ...DEFAULT_PET_OVERLAY,
+      ...parsed,
+      petSize: Math.min(224, Math.max(96, Number(parsed.petSize) || 152)),
+      showAfterSeconds: Math.min(
+        3600,
+        Math.max(0, Number(parsed.showAfterSeconds) || 0),
+      ),
+      visibleForSeconds: Math.min(
+        3600,
+        Math.max(2, Number(parsed.visibleForSeconds) || 10),
+      ),
+      bubbleStyle,
+    };
+  } catch {
+    return DEFAULT_PET_OVERLAY;
+  }
+}
+
+function initialPetFrames(): PetOverlayFrameSet {
+  const idle = BUNDLED_IDLE_FRAMES.length ? BUNDLED_IDLE_FRAMES : [petIdle];
+  return {
+    idle,
+    runLeft: BUNDLED_RUN_LEFT_FRAMES.length
+      ? BUNDLED_RUN_LEFT_FRAMES
+      : idle,
+    runRight: BUNDLED_RUN_RIGHT_FRAMES.length
+      ? BUNDLED_RUN_RIGHT_FRAMES
+      : idle,
+    hover: idle,
+    reminder: idle,
+  };
+}
+
+// Webview overlay used on Windows and Linux; macOS uses the native panel.
 function PetOverlay() {
+  const payload = useRef(readPetOverlayPayload()).current;
+  const appWindow = useRef(
+    "__TAURI_INTERNALS__" in window ? getCurrentWindow() : null,
+  ).current;
+  const [frames, setFrames] = useState<PetOverlayFrameSet>(initialPetFrames);
+  const [frameIndex, setFrameIndex] = useState(0);
+  const [bubbleVisible, setBubbleVisible] = useState(false);
+  const [interactionMotion, setInteractionMotion] = useState<
+    Exclude<PetMotion, "idle" | "reminder"> | undefined
+  >();
+  const dragging = useRef(false);
+  const movedDuringDrag = useRef(false);
+  const lastWindowX = useRef<number | undefined>(undefined);
+
+  const motion: PetMotion =
+    interactionMotion ?? (bubbleVisible ? "reminder" : "idle");
+  const activeFrames = frames[motion].length ? frames[motion] : frames.idle;
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+
+    let cancelled = false;
+
+    void invoke<PetOverlayFrameSet>("get_pet_overlay_frames", {
+      reminderAnimation: payload.reminderAnimation,
+    })
+      .then((loaded) => {
+        if (cancelled) return;
+        const fallback =
+          loaded.idle.length
+            ? loaded.idle
+            : loaded.runLeft.length
+              ? loaded.runLeft
+              : loaded.runRight.length
+                ? loaded.runRight
+                : loaded.hover.length
+                  ? loaded.hover
+                  : loaded.reminder;
+        if (!fallback.length) return;
+
+        const selectedCoreFrames =
+          payload.reminderAnimation === "run-left"
+            ? loaded.runLeft
+            : payload.reminderAnimation === "run-right"
+              ? loaded.runRight
+              : payload.reminderAnimation === "hover"
+                ? loaded.hover
+                : payload.reminderAnimation === "idle"
+                  ? loaded.idle
+                  : loaded.reminder;
+
+        setFrames({
+          idle: loaded.idle.length ? loaded.idle : fallback,
+          runLeft: loaded.runLeft.length ? loaded.runLeft : fallback,
+          runRight: loaded.runRight.length ? loaded.runRight : fallback,
+          hover: loaded.hover.length ? loaded.hover : fallback,
+          reminder: selectedCoreFrames.length ? selectedCoreFrames : fallback,
+        });
+      })
+      .catch(() => {
+        // Bundled frames keep the built-in character animated in web previews.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [payload.reminderAnimation]);
+
+  useEffect(() => {
+    if (!payload.showBubble) return;
+
+    let hideTimer: number | undefined;
+    const showTimer = window.setTimeout(() => {
+      setBubbleVisible(true);
+      hideTimer = window.setTimeout(
+        () => setBubbleVisible(false),
+        payload.visibleForSeconds * 1000,
+      );
+    }, payload.showAfterSeconds * 1000);
+
+    return () => {
+      window.clearTimeout(showTimer);
+      if (hideTimer !== undefined) window.clearTimeout(hideTimer);
+    };
+  }, [payload.showAfterSeconds, payload.showBubble, payload.visibleForSeconds]);
+
+  useEffect(() => {
+    setFrameIndex(0);
+    if (activeFrames.length <= 1) return;
+
+    const frameTimer = window.setInterval(() => {
+      setFrameIndex((current) => (current + 1) % activeFrames.length);
+    }, 90);
+
+    return () => window.clearInterval(frameTimer);
+  }, [activeFrames, motion]);
+
+  const finishDrag = useCallback((openOnClick = true) => {
+    if (!dragging.current) return;
+
+    const shouldOpenDashboard = openOnClick && !movedDuringDrag.current;
+    dragging.current = false;
+    setInteractionMotion(undefined);
+    if (shouldOpenDashboard) void invoke("open_dashboard");
+  }, []);
+
+  useEffect(() => {
+    const handlePointerUp = () => finishDrag();
+    const handlePointerCancel = () => finishDrag(false);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("mouseup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerCancel);
+
+    return () => {
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("mouseup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerCancel);
+    };
+  }, [finishDrag]);
+
+  useEffect(() => {
+    if (!appWindow) return;
+
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void appWindow
+      .outerPosition()
+      .then((position) => {
+        lastWindowX.current = position.x;
+      })
+      .catch(() => undefined);
+
+    void appWindow
+      .onMoved(({ payload: position }) => {
+        if (!dragging.current) {
+          lastWindowX.current = position.x;
+          return;
+        }
+
+        const previousX = lastWindowX.current;
+        lastWindowX.current = position.x;
+        movedDuringDrag.current = true;
+        if (previousX === undefined || position.x === previousX) return;
+        setInteractionMotion(position.x < previousX ? "runLeft" : "runRight");
+      })
+      .then((stopListening) => {
+        if (cancelled) {
+          stopListening();
+        } else {
+          unlisten = stopListening;
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [appWindow]);
+
+  const startDrag = () => {
+    if (!appWindow) return;
+
+    dragging.current = true;
+    movedDuringDrag.current = false;
+    setInteractionMotion("runRight");
+
+    void appWindow.startDragging().catch(() => finishDrag(false));
+  };
+
   return (
-    <div className="pet-window-root" data-tauri-drag-region>
-      <img src={petIdle} alt="" className="pet-window-character" />
-      <div className="pet-window-bubble">
-        <small>Baalert reminder</small>
-        <span>You have something coming up soon.</span>
-      </div>
+    <div
+      className={`pet-window-root pet-window-${payload.bubbleStyle}${payload.darkMode ? " pet-window-dark" : ""}`}
+      style={{ "--pet-size": `${payload.petSize}px` } as CSSProperties}
+    >
+      <img
+        src={activeFrames[frameIndex % activeFrames.length]}
+        alt=""
+        className="pet-window-character"
+        draggable={false}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          startDrag();
+        }}
+        onPointerCancel={() => finishDrag(false)}
+        onPointerUp={() => finishDrag()}
+        onPointerEnter={() => {
+          if (!dragging.current) setInteractionMotion("hover");
+        }}
+        onPointerLeave={() => {
+          if (!dragging.current) setInteractionMotion(undefined);
+        }}
+      />
+      {bubbleVisible && (
+        <div className="pet-window-bubble" role="status">
+          <button
+            type="button"
+            className="pet-window-bubble-close"
+            aria-label="Dismiss reminder"
+            onClick={() => setBubbleVisible(false)}
+          >
+            x
+          </button>
+          <small>{payload.title}</small>
+          <span>{payload.message}</span>
+        </div>
+      )}
     </div>
   );
 }

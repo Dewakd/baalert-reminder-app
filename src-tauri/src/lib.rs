@@ -1,3 +1,5 @@
+#[cfg(not(target_os = "macos"))]
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
@@ -135,6 +137,31 @@ struct CharacterPack {
     preview_data_url: String,
     animations: Vec<CharacterAnimationSummary>,
     total_frames: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PetOverlayFrameSet {
+    idle: Vec<String>,
+    run_left: Vec<String>,
+    run_right: Vec<String>,
+    hover: Vec<String>,
+    reminder: Vec<String>,
+}
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PetOverlayPayload {
+    title: String,
+    message: String,
+    show_after_seconds: u32,
+    visible_for_seconds: u32,
+    show_bubble: bool,
+    pet_size: u32,
+    bubble_style: String,
+    reminder_animation: String,
+    dark_mode: bool,
 }
 
 #[derive(Clone)]
@@ -298,6 +325,51 @@ fn get_animation_preview_frames(
             ))
         })
         .collect()
+}
+
+fn animation_data_urls(root: &Path, animation_id: &str) -> Result<Vec<String>, String> {
+    let frames = collect_png_frames(&root.join(animation_id)).unwrap_or_default();
+    frames
+        .into_iter()
+        .map(|frame| {
+            let bytes = fs::read(frame).map_err(|error| error.to_string())?;
+            Ok(format!(
+                "data:image/png;base64,{}",
+                BASE64_STANDARD.encode(bytes)
+            ))
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn get_pet_overlay_frames(
+    app: AppHandle,
+    reminder_animation: String,
+) -> Result<PetOverlayFrameSet, String> {
+    let root = resolve_active_character_root(&app)?;
+    let reminder_animation = normalize_reminder_animation(&reminder_animation);
+    let reminder = match reminder_animation.as_str() {
+        "idle" | "run-left" | "run-right" | "hover" => Vec::new(),
+        custom => animation_data_urls(&root, custom)?,
+    };
+    let frames = PetOverlayFrameSet {
+        idle: animation_data_urls(&root, "idle")?,
+        run_left: animation_data_urls(&root, "run-left")?,
+        run_right: animation_data_urls(&root, "run-right")?,
+        hover: animation_data_urls(&root, "hover")?,
+        reminder,
+    };
+
+    if frames.idle.is_empty()
+        && frames.run_left.is_empty()
+        && frames.run_right.is_empty()
+        && frames.hover.is_empty()
+        && frames.reminder.is_empty()
+    {
+        Err("The active character does not contain any animation frames".to_string())
+    } else {
+        Ok(frames)
+    }
 }
 
 fn resolve_builtin_character_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1468,6 +1540,8 @@ struct NativePetContent {
 static NATIVE_PET: Mutex<Option<NativePet>> = Mutex::new(None);
 #[cfg(target_os = "macos")]
 static LAST_PET_POSITION: Mutex<Option<(CGFloat, CGFloat)>> = Mutex::new(None);
+#[cfg(not(target_os = "macos"))]
+static LAST_PET_POSITION: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 
 #[cfg(target_os = "macos")]
 const BUBBLE_WIDTH: CGFloat = 364.0;
@@ -1630,7 +1704,6 @@ fn hide_native_pet(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 fn sanitize_message(message: String) -> String {
     let message: String = message.replace('\0', "").trim().chars().take(120).collect();
 
@@ -2468,12 +2541,57 @@ async fn show_pet(
 
     #[cfg(not(target_os = "macos"))]
     {
+        let previous_position = app
+            .get_webview_window("pet")
+            .and_then(|window| window.outer_position().ok())
+            .map(|position| (position.x, position.y))
+            .or_else(|| LAST_PET_POSITION.lock().ok().and_then(|position| *position));
         if let Some(existing) = app.get_webview_window("pet") {
             existing.close().map_err(|e| e.to_string())?;
             std::thread::sleep(std::time::Duration::from_millis(150));
         }
 
-        let url = "index.html?mode=pet";
+        let pet_size = pet_size.clamp(MIN_PET_SIZE, MAX_PET_SIZE);
+        let title: String = title
+            .unwrap_or_else(|| "Baalert reminder".to_string())
+            .replace('\0', "")
+            .trim()
+            .chars()
+            .take(48)
+            .collect();
+        let dark_mode = app
+            .state::<PetSettingsRepository>()
+            .settings
+            .lock()
+            .map(|settings| settings.dark_mode)
+            .unwrap_or(false);
+        let payload = PetOverlayPayload {
+            title: if title.is_empty() {
+                "Baalert reminder".to_string()
+            } else {
+                title
+            },
+            message: sanitize_message(message),
+            show_after_seconds: show_after_seconds.min(3600),
+            visible_for_seconds: visible_for_seconds.clamp(2, 3600),
+            show_bubble,
+            pet_size,
+            bubble_style: normalize_bubble_style(&bubble_style),
+            reminder_animation: reminder_animation
+                .as_deref()
+                .map(normalize_reminder_animation)
+                .unwrap_or_else(default_reminder_animation),
+            dark_mode,
+        };
+        let payload_json = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
+        let url = format!(
+            "index.html?mode=pet&payload={}",
+            BASE64_URL_SAFE_NO_PAD.encode(payload_json)
+        );
+        let (position_x, position_y) = previous_position.unwrap_or((40, 40));
+        if let Ok(mut position) = LAST_PET_POSITION.lock() {
+            *position = Some((position_x, position_y));
+        }
         let pet_window = WebviewWindowBuilder::new(&app, "pet", WebviewUrl::App(url.into()))
             .title("")
             .decorations(false)
@@ -2485,8 +2603,9 @@ async fn show_pet(
             .focusable(false)
             .focused(false)
             .visible(false)
-            .inner_size((pet_size + 384) as f64, (pet_size + 38) as f64)
-            .position(40.0, 40.0)
+            .shadow(false)
+            .inner_size((pet_size + 400) as f64, (pet_size + 50).max(172) as f64)
+            .position(position_x as f64, position_y as f64)
             .build()
             .map_err(|e| e.to_string())?;
 
@@ -2494,17 +2613,25 @@ async fn show_pet(
             .set_visible_on_all_workspaces(true)
             .map_err(|e| e.to_string())?;
         pet_window.show().map_err(|e| e.to_string())?;
-        let _ = (
-            title,
-            message,
-            show_after_seconds,
-            visible_for_seconds,
-            show_bubble,
-            bubble_style,
-            reminder_animation,
-        );
         Ok(())
     }
+}
+
+#[tauri::command]
+fn open_dashboard(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        show_main_dashboard(&app);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    if let Some(window) = app.get_webview_window("main") {
+        window.show().map_err(|error| error.to_string())?;
+        let _ = window.unminimize();
+        window.set_focus().map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -2517,6 +2644,11 @@ async fn hide_pet(app: AppHandle) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     {
         if let Some(window) = app.get_webview_window("pet") {
+            if let Ok(position) = window.outer_position() {
+                if let Ok(mut last_position) = LAST_PET_POSITION.lock() {
+                    *last_position = Some((position.x, position.y));
+                }
+            }
             window.close().map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -2560,6 +2692,7 @@ pub fn run() {
             show_pet,
             hide_pet,
             is_pet_visible,
+            open_dashboard,
             list_reminders,
             create_reminder,
             set_reminder_enabled,
@@ -2577,7 +2710,8 @@ pub fn run() {
             import_character,
             set_active_character,
             delete_character,
-            get_animation_preview_frames
+            get_animation_preview_frames,
+            get_pet_overlay_frames
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
