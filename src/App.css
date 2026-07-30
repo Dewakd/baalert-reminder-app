@@ -2517,6 +2517,10 @@ body:has(.pet-window-root) #root {
   user-select: none;
 }
 
+.pet-window-root.pet-window-bubble-left {
+  flex-direction: row-reverse;
+}
+
 .pet-window-pink {
   --pet-bubble: #ff78c7;
 }
@@ -2586,6 +2590,11 @@ body:has(.pet-window-root) #root {
   animation: pet-bubble-in 160ms steps(2, end);
 }
 
+.pet-window-bubble-left .pet-window-bubble {
+  margin-right: -10px;
+  margin-left: 0;
+}
+
 .pet-window-bubble::before {
   position: absolute;
   bottom: -15px;
@@ -2597,6 +2606,11 @@ body:has(.pet-window-root) #root {
   border-bottom: 3px solid var(--pet-ink);
   content: "";
   transform: rotate(45deg);
+}
+
+.pet-window-bubble-left .pet-window-bubble::before {
+  right: 22px;
+  left: auto;
 }
 
 .pet-window-bubble small {

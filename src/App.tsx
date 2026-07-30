@@ -7,7 +7,8 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
+import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -15,6 +16,7 @@ import "./App.css";
 import petIdle from "../src-tauri/resources/character/idle/Front_Idle_01.png";
 
 type PetOverlayPayload = {
+  revision: number;
   title: string;
   message: string;
   showAfterSeconds: number;
@@ -35,8 +37,19 @@ type PetOverlayFrameSet = {
 };
 
 type PetMotion = "idle" | "runLeft" | "runRight" | "hover" | "reminder";
+type PetBubbleSide = "left" | "right";
+type PetWindowLayoutMode = "pet" | PetBubbleSide;
+type PetWindowLayout = {
+  mode: PetWindowLayoutMode;
+  petSize: number;
+  width: number;
+  height: number;
+  petX: number;
+  petY: number;
+};
 
 const DEFAULT_PET_OVERLAY: PetOverlayPayload = {
+  revision: 0,
   title: "Baalert reminder",
   message: "You have something coming up soon.",
   showAfterSeconds: 0,
@@ -47,6 +60,58 @@ const DEFAULT_PET_OVERLAY: PetOverlayPayload = {
   reminderAnimation: "idle",
   darkMode: false,
 };
+
+function normalizePetOverlayPayload(
+  parsed: Partial<PetOverlayPayload>,
+): PetOverlayPayload {
+  const bubbleStyle = ["lime", "pink", "yellow", "cyan"].includes(
+    parsed.bubbleStyle ?? "",
+  )
+    ? (parsed.bubbleStyle as BubbleStyle)
+    : DEFAULT_PET_OVERLAY.bubbleStyle;
+
+  return {
+    ...DEFAULT_PET_OVERLAY,
+    ...parsed,
+    revision: Number(parsed.revision) || Date.now(),
+    title:
+      typeof parsed.title === "string"
+        ? parsed.title
+        : DEFAULT_PET_OVERLAY.title,
+    message:
+      typeof parsed.message === "string"
+        ? parsed.message
+        : DEFAULT_PET_OVERLAY.message,
+    petSize: Math.min(224, Math.max(96, Number(parsed.petSize) || 152)),
+    showAfterSeconds: Math.min(
+      3600,
+      Math.max(0, Number(parsed.showAfterSeconds) || 0),
+    ),
+    visibleForSeconds: Math.min(
+      3600,
+      Math.max(2, Number(parsed.visibleForSeconds) || 10),
+    ),
+    bubbleStyle,
+  };
+}
+
+function createPetWindowLayout(
+  mode: PetWindowLayoutMode,
+  petSize: number,
+): PetWindowLayout {
+  const width = mode === "pet" ? petSize + 28 : petSize + 400;
+  const height =
+    mode === "pet" ? petSize + 28 : Math.max(petSize + 50, 172);
+
+  return {
+    mode,
+    petSize,
+    width,
+    height,
+    petX: mode === "left" ? width - petSize - 14 : 14,
+    petY: height - petSize - 18,
+  };
+}
 
 function bundledFrames(modules: Record<string, unknown>) {
   return Object.entries(modules)
@@ -90,27 +155,9 @@ function readPetOverlayPayload(): PetOverlayPayload {
     const bytes = Uint8Array.from(binary, (character) =>
       character.charCodeAt(0),
     );
-    const parsed = JSON.parse(new TextDecoder().decode(bytes));
-    const bubbleStyle = ["lime", "pink", "yellow", "cyan"].includes(
-      parsed.bubbleStyle,
-    )
-      ? parsed.bubbleStyle
-      : DEFAULT_PET_OVERLAY.bubbleStyle;
-
-    return {
-      ...DEFAULT_PET_OVERLAY,
-      ...parsed,
-      petSize: Math.min(224, Math.max(96, Number(parsed.petSize) || 152)),
-      showAfterSeconds: Math.min(
-        3600,
-        Math.max(0, Number(parsed.showAfterSeconds) || 0),
-      ),
-      visibleForSeconds: Math.min(
-        3600,
-        Math.max(2, Number(parsed.visibleForSeconds) || 10),
-      ),
-      bubbleStyle,
-    };
+    return normalizePetOverlayPayload(
+      JSON.parse(new TextDecoder().decode(bytes)),
+    );
   } catch {
     return DEFAULT_PET_OVERLAY;
   }
@@ -133,13 +180,16 @@ function initialPetFrames(): PetOverlayFrameSet {
 
 // Webview overlay used on Windows and Linux; macOS uses the native panel.
 function PetOverlay() {
-  const payload = useRef(readPetOverlayPayload()).current;
+  const initialPayload = useRef(readPetOverlayPayload()).current;
   const appWindow = useRef(
     "__TAURI_INTERNALS__" in window ? getCurrentWindow() : null,
   ).current;
+  const [payload, setPayload] = useState(initialPayload);
   const [frames, setFrames] = useState<PetOverlayFrameSet>(initialPetFrames);
   const [frameIndex, setFrameIndex] = useState(0);
   const [bubbleVisible, setBubbleVisible] = useState(false);
+  const [bubbleSide, setBubbleSide] = useState<PetBubbleSide>("right");
+  const [layoutRefresh, setLayoutRefresh] = useState(0);
   const [interactionMotion, setInteractionMotion] = useState<
     Exclude<PetMotion, "idle" | "reminder"> | undefined
   >();
@@ -152,10 +202,38 @@ function PetOverlay() {
     undefined,
   );
   const releasePollTimer = useRef<number | undefined>(undefined);
+  const layoutRequest = useRef(0);
+  const windowLayout = useRef(
+    createPetWindowLayout("pet", initialPayload.petSize),
+  );
 
   const motion: PetMotion =
     interactionMotion ?? (bubbleVisible ? "reminder" : "idle");
   const activeFrames = frames[motion].length ? frames[motion] : frames.idle;
+
+  useEffect(() => {
+    if (!appWindow) return;
+
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void appWindow
+      .listen<PetOverlayPayload>("pet-overlay-update", (event) => {
+        setPayload(normalizePetOverlayPayload(event.payload));
+      })
+      .then((stopListening) => {
+        if (cancelled) {
+          stopListening();
+        } else {
+          unlisten = stopListening;
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [appWindow]);
 
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -205,25 +283,111 @@ function PetOverlay() {
     return () => {
       cancelled = true;
     };
-  }, [payload.reminderAnimation]);
+  }, [payload.reminderAnimation, payload.revision]);
 
   useEffect(() => {
-    if (!payload.showBubble) return;
+    if (!payload.showBubble) {
+      setBubbleVisible(false);
+      return;
+    }
 
     let hideTimer: number | undefined;
-    const showTimer = window.setTimeout(() => {
+    const showBubble = () => {
       setBubbleVisible(true);
       hideTimer = window.setTimeout(
         () => setBubbleVisible(false),
         payload.visibleForSeconds * 1000,
       );
-    }, payload.showAfterSeconds * 1000);
+    };
+    const showTimer =
+      payload.showAfterSeconds === 0
+        ? (showBubble(), undefined)
+        : window.setTimeout(showBubble, payload.showAfterSeconds * 1000);
+    if (payload.showAfterSeconds > 0) setBubbleVisible(false);
 
     return () => {
-      window.clearTimeout(showTimer);
+      if (showTimer !== undefined) window.clearTimeout(showTimer);
       if (hideTimer !== undefined) window.clearTimeout(hideTimer);
     };
-  }, [payload.showAfterSeconds, payload.showBubble, payload.visibleForSeconds]);
+  }, [
+    payload.revision,
+    payload.showAfterSeconds,
+    payload.showBubble,
+    payload.visibleForSeconds,
+  ]);
+
+  const applyWindowLayout = useCallback(
+    async (showBubble: boolean) => {
+      if (!appWindow) return;
+
+      const request = ++layoutRequest.current;
+      try {
+        const [position, scaleFactor, monitor] = await Promise.all([
+          appWindow.outerPosition(),
+          appWindow.scaleFactor(),
+          currentMonitor(),
+        ]);
+        if (request !== layoutRequest.current) return;
+
+        const previousLayout = windowLayout.current;
+        const petScreenX = position.x + previousLayout.petX * scaleFactor;
+        const petScreenY = position.y + previousLayout.petY * scaleFactor;
+        let nextLayout = createPetWindowLayout("pet", payload.petSize);
+
+        if (showBubble) {
+          const rightLayout = createPetWindowLayout("right", payload.petSize);
+          const leftLayout = createPetWindowLayout("left", payload.petSize);
+          const workArea = monitor?.workArea;
+          const rightX = petScreenX - rightLayout.petX * scaleFactor;
+          const leftX = petScreenX - leftLayout.petX * scaleFactor;
+          const workLeft = workArea?.position.x ?? Number.NEGATIVE_INFINITY;
+          const workRight = workArea
+            ? workArea.position.x + workArea.size.width
+            : Number.POSITIVE_INFINITY;
+          const rightFits =
+            rightX + rightLayout.width * scaleFactor <= workRight;
+          const leftFits = leftX >= workLeft;
+          const side: PetBubbleSide =
+            rightFits || !leftFits ? "right" : "left";
+          nextLayout = side === "right" ? rightLayout : leftLayout;
+        }
+
+        let nextX = petScreenX - nextLayout.petX * scaleFactor;
+        let nextY = petScreenY - nextLayout.petY * scaleFactor;
+        if (monitor) {
+          const workLeft = monitor.workArea.position.x;
+          const workTop = monitor.workArea.position.y;
+          const workRight = workLeft + monitor.workArea.size.width;
+          const workBottom = workTop + monitor.workArea.size.height;
+          nextX = Math.min(
+            Math.max(nextX, workLeft),
+            workRight - nextLayout.width * scaleFactor,
+          );
+          nextY = Math.min(
+            Math.max(nextY, workTop),
+            workBottom - nextLayout.height * scaleFactor,
+          );
+        }
+
+        if (request !== layoutRequest.current) return;
+        windowLayout.current = nextLayout;
+        if (nextLayout.mode !== "pet") setBubbleSide(nextLayout.mode);
+        await appWindow.setSize(
+          new LogicalSize(nextLayout.width, nextLayout.height),
+        );
+        await appWindow.setPosition(
+          new PhysicalPosition(Math.round(nextX), Math.round(nextY)),
+        );
+      } catch {
+        // Keep the last valid layout if the monitor changes during the update.
+      }
+    },
+    [appWindow, payload.petSize],
+  );
+
+  useEffect(() => {
+    void applyWindowLayout(bubbleVisible);
+  }, [applyWindowLayout, bubbleVisible, layoutRefresh]);
 
   useEffect(() => {
     setFrameIndex(0);
@@ -247,6 +411,7 @@ function PetOverlay() {
     dragging.current = false;
     dragOriginPosition.current = undefined;
     setInteractionMotion(undefined);
+    setLayoutRefresh((current) => current + 1);
     if (shouldOpenDashboard) void invoke("open_dashboard");
   }, []);
 
@@ -343,7 +508,7 @@ function PetOverlay() {
 
   return (
     <div
-      className={`pet-window-root pet-window-${payload.bubbleStyle}${payload.darkMode ? " pet-window-dark" : ""}`}
+      className={`pet-window-root pet-window-${payload.bubbleStyle} pet-window-bubble-${bubbleSide}${payload.darkMode ? " pet-window-dark" : ""}`}
       style={{ "--pet-size": `${payload.petSize}px` } as CSSProperties}
     >
       <img

@@ -18,6 +18,8 @@ use std::{
 #[cfg(not(target_os = "macos"))]
 use tauri::webview::WebviewWindowBuilder;
 #[cfg(not(target_os = "macos"))]
+use tauri::Emitter;
+#[cfg(not(target_os = "macos"))]
 use tauri::WebviewUrl;
 use tauri::{AppHandle, Manager, State};
 
@@ -159,6 +161,7 @@ struct PetOverlayFrameSet {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PetOverlayPayload {
+    revision: u64,
     title: String,
     message: String,
     show_after_seconds: u32,
@@ -1347,6 +1350,13 @@ impl CGRect {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BubbleSide {
+    Left,
+    Right,
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
 struct PetLayout {
     panel_width: CGFloat,
@@ -1356,6 +1366,7 @@ struct PetLayout {
     image_size: CGFloat,
     bubble_x: CGFloat,
     bubble_y: CGFloat,
+    bubble_side: BubbleSide,
 }
 
 #[cfg(target_os = "macos")]
@@ -1402,13 +1413,19 @@ fn bubble_theme(style: &str, dark_mode: bool) -> BubbleTheme {
 
 #[cfg(target_os = "macos")]
 impl PetLayout {
-    fn new(pet_size: u32) -> Self {
+    fn new(pet_size: u32, bubble_side: BubbleSide) -> Self {
         let image_size = pet_size.clamp(MIN_PET_SIZE, MAX_PET_SIZE) as CGFloat;
-        let image_x = 10.0;
+        let image_x = match bubble_side {
+            BubbleSide::Left => BUBBLE_WIDTH + 10.0,
+            BubbleSide::Right => 10.0,
+        };
         let image_y = 6.0;
-        let bubble_x = image_x + image_size - 10.0;
+        let bubble_x = match bubble_side {
+            BubbleSide::Left => 10.0,
+            BubbleSide::Right => image_size,
+        };
         let bubble_y = image_y + image_size * 0.47;
-        let panel_width = bubble_x + BUBBLE_WIDTH + 20.0;
+        let panel_width = image_size + BUBBLE_WIDTH + 20.0;
         let panel_height = (image_y + image_size + 32.0).max(bubble_y + BUBBLE_HEIGHT + 20.0);
 
         Self {
@@ -1419,6 +1436,7 @@ impl PetLayout {
             image_size,
             bubble_x,
             bubble_y,
+            bubble_side,
         }
     }
 }
@@ -1458,6 +1476,7 @@ struct NativePetPanelInfo {
     bubble_views: Arc<Vec<usize>>,
     frames: CharacterFrameHandles,
     retained_images: Vec<usize>,
+    layout: PetLayout,
 }
 
 #[cfg(target_os = "macos")]
@@ -1477,7 +1496,7 @@ enum PetMotion {
     RunLeft,
     RunRight,
     Hover,
-    OneShot(AnimationSlot),
+    Reminder,
 }
 
 #[cfg(target_os = "macos")]
@@ -1531,6 +1550,7 @@ struct PetInteractionState {
     bubble_alpha: CGFloat,
     bubble_dismissed: bool,
     bubble_enabled: bool,
+    reminder_animation: AnimationSlot,
 }
 
 #[cfg(target_os = "macos")]
@@ -1584,7 +1604,6 @@ fn show_native_pet(
         title
     };
     let message = sanitize_message(message);
-    let layout = PetLayout::new(pet_size);
     let dark_mode = app
         .state::<PetSettingsRepository>()
         .settings
@@ -1592,16 +1611,13 @@ fn show_native_pet(
         .map(|settings| settings.dark_mode)
         .unwrap_or(false);
     let theme = bubble_theme(&bubble_style, dark_mode);
-    let info = create_native_pet_on_main_thread(&app, frame_paths, title, message, layout, theme)?;
-    let initial_motion = if show_bubble {
-        let animation = reminder_animation
-            .as_deref()
-            .map(|id| animation_slot_for_id(&info.frames, id))
-            .unwrap_or(AnimationSlot::Idle);
-        PetMotion::OneShot(animation)
-    } else {
-        PetMotion::Idle
-    };
+    let info =
+        create_native_pet_on_main_thread(&app, frame_paths, title, message, pet_size, theme)?;
+    let layout = info.layout;
+    let reminder_animation = reminder_animation
+        .as_deref()
+        .map(|id| animation_slot_for_id(&info.frames, id))
+        .unwrap_or(AnimationSlot::Idle);
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = stop.clone();
     let worker_app = app.clone();
@@ -1612,7 +1628,7 @@ fn show_native_pet(
         press_origin: CGPoint { x: 0.0, y: 0.0 },
         moved_during_press: false,
         last_x: 0.0,
-        motion: initial_motion,
+        motion: PetMotion::Idle,
         frame_index: 0,
         animation_tick: 0,
         launched_at: Instant::now(),
@@ -1621,6 +1637,7 @@ fn show_native_pet(
         bubble_alpha: 0.0,
         bubble_dismissed: false,
         bubble_enabled: show_bubble,
+        reminder_animation,
     }));
     let panel = info.panel;
     let image_view = info.image_view;
@@ -1808,7 +1825,7 @@ fn create_native_pet_on_main_thread(
     frame_paths: CharacterFramePaths,
     title: String,
     message: String,
-    layout: PetLayout,
+    pet_size: u32,
     theme: BubbleTheme,
 ) -> Result<NativePetPanelInfo, String> {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1817,7 +1834,7 @@ fn create_native_pet_on_main_thread(
     runner
         .run_on_main_thread(move || {
             let result =
-                unsafe { create_native_pet_panel(&frame_paths, &title, &message, layout, theme) };
+                unsafe { create_native_pet_panel(&frame_paths, &title, &message, pet_size, theme) };
             let _ = tx.send(result);
         })
         .map_err(|e| e.to_string())?;
@@ -1831,7 +1848,7 @@ unsafe fn create_native_pet_panel(
     frame_paths: &CharacterFramePaths,
     title: &str,
     message: &str,
-    layout: PetLayout,
+    pet_size: u32,
     theme: BubbleTheme,
 ) -> Result<NativePetPanelInfo, String> {
     use objc2::msg_send;
@@ -1844,21 +1861,36 @@ unsafe fn create_native_pet_panel(
     }
 
     let visible_frame: CGRect = msg_send![screen, visibleFrame];
-    let default_x = visible_frame.origin.x + visible_frame.size.width - layout.panel_width - 32.0;
-    let default_y = visible_frame.origin.y + 42.0;
-    let (stored_x, stored_y) = LAST_PET_POSITION
+    let right_layout = PetLayout::new(pet_size, BubbleSide::Right);
+    let left_layout = PetLayout::new(pet_size, BubbleSide::Left);
+    let visible_right = visible_frame.origin.x + visible_frame.size.width;
+    let default_pet_x = visible_right - right_layout.image_size - 32.0;
+    let default_pet_y = visible_frame.origin.y + 48.0;
+    let (pet_x, pet_y) = LAST_PET_POSITION
         .lock()
         .ok()
         .and_then(|position| *position)
-        .unwrap_or((default_x, default_y));
-    let initial_x = stored_x.clamp(
+        .unwrap_or((default_pet_x, default_pet_y));
+    let right_origin_x = pet_x - right_layout.image_x;
+    let left_origin_x = pet_x - left_layout.image_x;
+    let layout = if right_origin_x + right_layout.panel_width <= visible_right
+        || left_origin_x < visible_frame.origin.x
+    {
+        right_layout
+    } else {
+        left_layout
+    };
+    let initial_x = (pet_x - layout.image_x).clamp(
         visible_frame.origin.x,
         visible_frame.origin.x + visible_frame.size.width - layout.panel_width,
     );
-    let initial_y = stored_y.clamp(
+    let initial_y = (pet_y - layout.image_y).clamp(
         visible_frame.origin.y,
         visible_frame.origin.y + visible_frame.size.height - layout.panel_height,
     );
+    if let Ok(mut position) = LAST_PET_POSITION.lock() {
+        *position = Some((initial_x + layout.image_x, initial_y + layout.image_y));
+    }
     let panel_rect = CGRect::new(
         initial_x,
         initial_y,
@@ -1921,6 +1953,7 @@ unsafe fn create_native_pet_panel(
         bubble_views: content.bubble_views,
         frames: content.frames,
         retained_images: content.retained_images,
+        layout,
     })
 }
 
@@ -2044,15 +2077,22 @@ unsafe fn create_pet_content_view(
     let image_view_handle = image_view as usize;
     let _: () = msg_send![image_view, release];
 
+    let (large_dot_x, small_dot_x) = match layout.bubble_side {
+        BubbleSide::Left => (
+            layout.bubble_x + BUBBLE_WIDTH,
+            layout.bubble_x + BUBBLE_WIDTH - 4.0,
+        ),
+        BubbleSide::Right => (layout.bubble_x - 13.0, layout.bubble_x - 4.0),
+    };
     let large_thought_dot = add_thought_dot(
         view,
-        CGRect::new(layout.bubble_x - 13.0, layout.bubble_y, 13.0, 13.0),
+        CGRect::new(large_dot_x, layout.bubble_y, 13.0, 13.0),
         1.0,
         theme,
     )?;
     let small_thought_dot = add_thought_dot(
         view,
-        CGRect::new(layout.bubble_x - 4.0, layout.bubble_y + 13.0, 8.0, 8.0),
+        CGRect::new(small_dot_x, layout.bubble_y + 13.0, 8.0, 8.0),
         1.0,
         theme,
     )?;
@@ -2362,9 +2402,11 @@ unsafe fn update_pet_interaction(
         }
     }
 
-    let mut desired_motion = match state.motion {
-        PetMotion::OneShot(animation) => PetMotion::OneShot(animation),
-        _ => PetMotion::Idle,
+    let reminder_visible = bubble_should_show || state.bubble_alpha > 0.05;
+    let mut desired_motion = if reminder_visible {
+        PetMotion::Reminder
+    } else {
+        PetMotion::Idle
     };
     if state.dragging && mouse_down {
         let total_delta_x = cursor.x - state.press_origin.x;
@@ -2390,11 +2432,11 @@ unsafe fn update_pet_interaction(
 
         state.last_x = new_origin.x;
         if let Ok(mut position) = LAST_PET_POSITION.lock() {
-            *position = Some((new_origin.x, new_origin.y));
+            *position = Some((new_origin.x + layout.image_x, new_origin.y + layout.image_y));
         }
     } else if !mouse_down {
         state.dragging = false;
-        if !matches!(desired_motion, PetMotion::OneShot(_)) {
+        if !matches!(desired_motion, PetMotion::Reminder) {
             desired_motion = if over_pet {
                 PetMotion::Hover
             } else {
@@ -2416,20 +2458,12 @@ unsafe fn update_pet_interaction(
         }
     }
 
-    if let PetMotion::OneShot(animation) = state.motion {
-        if state.frame_index >= animation_frames(frames, animation).len() {
-            state.motion = PetMotion::Idle;
-            state.frame_index = 0;
-            state.animation_tick = 0;
-        }
-    }
-
     let active_frames: &[usize] = match state.motion {
         PetMotion::Idle => frames.idle.as_slice(),
         PetMotion::RunLeft => frames.run_left.as_slice(),
         PetMotion::RunRight => frames.run_right.as_slice(),
         PetMotion::Hover => frames.hover.as_slice(),
-        PetMotion::OneShot(animation) => animation_frames(frames, animation),
+        PetMotion::Reminder => animation_frames(frames, state.reminder_animation),
     };
     state.frame_index %= active_frames.len();
     let image = active_frames[state.frame_index] as *mut AnyObject;
@@ -2547,16 +2581,6 @@ async fn show_pet(
 
     #[cfg(not(target_os = "macos"))]
     {
-        let previous_position = app
-            .get_webview_window("pet")
-            .and_then(|window| window.outer_position().ok())
-            .map(|position| (position.x, position.y))
-            .or_else(|| LAST_PET_POSITION.lock().ok().and_then(|position| *position));
-        if let Some(existing) = app.get_webview_window("pet") {
-            existing.close().map_err(|e| e.to_string())?;
-            std::thread::sleep(std::time::Duration::from_millis(150));
-        }
-
         let pet_size = pet_size.clamp(MIN_PET_SIZE, MAX_PET_SIZE);
         let title: String = title
             .unwrap_or_else(|| "Baalert reminder".to_string())
@@ -2572,6 +2596,7 @@ async fn show_pet(
             .map(|settings| settings.dark_mode)
             .unwrap_or(false);
         let payload = PetOverlayPayload {
+            revision: current_time_millis(),
             title: if title.is_empty() {
                 "Baalert reminder".to_string()
             } else {
@@ -2589,6 +2614,22 @@ async fn show_pet(
                 .unwrap_or_else(default_reminder_animation),
             dark_mode,
         };
+
+        if let Some(existing) = app.get_webview_window("pet") {
+            existing
+                .emit("pet-overlay-update", payload)
+                .map_err(|error| error.to_string())?;
+            existing
+                .set_always_on_top(true)
+                .map_err(|error| error.to_string())?;
+            existing
+                .set_visible_on_all_workspaces(true)
+                .map_err(|error| error.to_string())?;
+            existing.show().map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+
+        let previous_position = LAST_PET_POSITION.lock().ok().and_then(|position| *position);
         let payload_json = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
         let url = format!(
             "index.html?mode=pet&payload={}",
@@ -2610,7 +2651,7 @@ async fn show_pet(
             .focused(false)
             .visible(false)
             .shadow(false)
-            .inner_size((pet_size + 400) as f64, (pet_size + 50).max(172) as f64)
+            .inner_size((pet_size + 28) as f64, (pet_size + 28) as f64)
             .position(position_x as f64, position_y as f64)
             .build()
             .map_err(|e| e.to_string())?;
