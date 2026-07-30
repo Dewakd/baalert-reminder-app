@@ -46,7 +46,10 @@ type PetWindowLayout = {
   height: number;
   petX: number;
   petY: number;
+  bubbleHeight: number;
 };
+
+const MAX_REMINDER_MESSAGE_LENGTH = 240;
 
 const DEFAULT_PET_OVERLAY: PetOverlayPayload = {
   revision: 0,
@@ -70,6 +73,8 @@ function normalizePetOverlayPayload(
     ? (parsed.bubbleStyle as BubbleStyle)
     : DEFAULT_PET_OVERLAY.bubbleStyle;
 
+  const visibleForSeconds = Number(parsed.visibleForSeconds);
+
   return {
     ...DEFAULT_PET_OVERLAY,
     ...parsed,
@@ -87,10 +92,10 @@ function normalizePetOverlayPayload(
       3600,
       Math.max(0, Number(parsed.showAfterSeconds) || 0),
     ),
-    visibleForSeconds: Math.min(
-      3600,
-      Math.max(2, Number(parsed.visibleForSeconds) || 10),
-    ),
+    visibleForSeconds:
+      visibleForSeconds === 0
+        ? 0
+        : Math.min(3600, Math.max(2, visibleForSeconds || 10)),
     bubbleStyle,
   };
 }
@@ -98,10 +103,16 @@ function normalizePetOverlayPayload(
 function createPetWindowLayout(
   mode: PetWindowLayoutMode,
   petSize: number,
+  bubbleHeight = 92,
 ): PetWindowLayout {
   const width = mode === "pet" ? petSize + 28 : petSize + 400;
   const height =
-    mode === "pet" ? petSize + 28 : Math.max(petSize + 50, 172);
+    mode === "pet"
+      ? petSize + 28
+      : Math.max(
+          petSize + 50,
+          bubbleHeight + Math.round(petSize * 0.34) + 38,
+        );
 
   return {
     mode,
@@ -110,6 +121,7 @@ function createPetWindowLayout(
     height,
     petX: mode === "left" ? width - petSize - 14 : 14,
     petY: height - petSize - 18,
+    bubbleHeight: mode === "pet" ? 0 : bubbleHeight,
   };
 }
 
@@ -202,6 +214,7 @@ function PetOverlay() {
     undefined,
   );
   const releasePollTimer = useRef<number | undefined>(undefined);
+  const bubbleElement = useRef<HTMLDivElement | null>(null);
   const layoutRequest = useRef(0);
   const windowLayout = useRef(
     createPetWindowLayout("pet", initialPayload.petSize),
@@ -294,10 +307,12 @@ function PetOverlay() {
     let hideTimer: number | undefined;
     const showBubble = () => {
       setBubbleVisible(true);
-      hideTimer = window.setTimeout(
-        () => setBubbleVisible(false),
-        payload.visibleForSeconds * 1000,
-      );
+      if (payload.visibleForSeconds > 0) {
+        hideTimer = window.setTimeout(
+          () => setBubbleVisible(false),
+          payload.visibleForSeconds * 1000,
+        );
+      }
     };
     const showTimer =
       payload.showAfterSeconds === 0
@@ -335,8 +350,20 @@ function PetOverlay() {
         let nextLayout = createPetWindowLayout("pet", payload.petSize);
 
         if (showBubble) {
-          const rightLayout = createPetWindowLayout("right", payload.petSize);
-          const leftLayout = createPetWindowLayout("left", payload.petSize);
+          const bubbleHeight = Math.max(
+            92,
+            Math.ceil(bubbleElement.current?.getBoundingClientRect().height ?? 92),
+          );
+          const rightLayout = createPetWindowLayout(
+            "right",
+            payload.petSize,
+            bubbleHeight,
+          );
+          const leftLayout = createPetWindowLayout(
+            "left",
+            payload.petSize,
+            bubbleHeight,
+          );
           const workArea = monitor?.workArea;
           const rightX = petScreenX - rightLayout.petX * scaleFactor;
           const leftX = petScreenX - leftLayout.petX * scaleFactor;
@@ -531,7 +558,7 @@ function PetOverlay() {
         }}
       />
       {bubbleVisible && (
-        <div className="pet-window-bubble" role="status">
+        <div ref={bubbleElement} className="pet-window-bubble" role="status">
           <button
             type="button"
             className="pet-window-bubble-close"
@@ -558,6 +585,7 @@ type Reminder = {
   intervalValue: number;
   intervalUnit: "minutes" | "hours";
   animation: string;
+  visibleForSeconds: number;
   enabled: boolean;
   nextRunAt: number;
 };
@@ -603,6 +631,21 @@ const BUBBLE_STYLES: {
   { id: "yellow", name: "Sunny Note", description: "Warm and direct" },
   { id: "cyan", name: "Sky Signal", description: "Cool and crisp" },
 ];
+
+const REMINDER_DURATION_OPTIONS = [
+  { value: 5, label: "5 seconds" },
+  { value: 10, label: "10 seconds" },
+  { value: 15, label: "15 seconds" },
+  { value: 30, label: "30 seconds" },
+  { value: 60, label: "1 minute" },
+  { value: 0, label: "Until dismissed" },
+] as const;
+
+function reminderDurationLabel(seconds: number) {
+  if (seconds === 0) return "Stays until dismissed";
+  if (seconds === 60) return "Visible for 1 minute";
+  return `Visible for ${seconds} seconds`;
+}
 
 const CORE_ANIMATION_SLOTS = [
   { id: "idle", name: "Idle" },
@@ -706,6 +749,7 @@ function RemindersPage({
     "minutes",
   );
   const [animation, setAnimation] = useState("idle");
+  const [visibleForSeconds, setVisibleForSeconds] = useState(10);
   const [busy, setBusy] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [animationUpdatingId, setAnimationUpdatingId] = useState<string | null>(
@@ -719,6 +763,7 @@ function RemindersPage({
     frames: string[];
   } | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   function updateReminderState(
@@ -763,22 +808,59 @@ function RemindersPage({
     setIntervalValue((current) => Math.min(current, unit === "minutes" ? 60 : 24));
   }
 
-  async function handleCreateReminder(event: React.FormEvent) {
+  function openCreateEditor() {
+    setTitle("");
+    setMessage("");
+    setIntervalValue(30);
+    setIntervalUnit("minutes");
+    setAnimation(animations[0]?.id ?? "idle");
+    setVisibleForSeconds(10);
+    setEditingId(null);
+    setError("");
+    setEditorOpen(true);
+  }
+
+  function openEditEditor(reminder: Reminder) {
+    setTitle(reminder.title);
+    setMessage(reminder.message);
+    setIntervalValue(reminder.intervalValue);
+    setIntervalUnit(reminder.intervalUnit);
+    setAnimation(reminder.animation);
+    setVisibleForSeconds(reminder.visibleForSeconds);
+    setEditingId(reminder.id);
+    setError("");
+    setEditorOpen(true);
+  }
+
+  function closeEditor() {
+    if (busy) return;
+    setEditorOpen(false);
+    setEditingId(null);
+    setError("");
+  }
+
+  async function handleSaveReminder(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError("");
     try {
-      const reminder = await invoke<Reminder>("create_reminder", {
+      const command = editingId ? "update_reminder" : "create_reminder";
+      const reminder = await invoke<Reminder>(command, {
+        ...(editingId ? { id: editingId } : {}),
         title,
         message,
         intervalValue,
         intervalUnit,
         animation,
+        visibleForSeconds,
       });
-      updateReminderState((current) => [...current, reminder]);
-      setTitle("");
-      setMessage("");
+      updateReminderState((current) =>
+        editingId
+          ? current.map((item) => (item.id === reminder.id ? reminder : item))
+          : [...current, reminder],
+      );
       setEditorOpen(false);
+      setEditingId(null);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -890,10 +972,7 @@ function RemindersPage({
           <button
             className="add-reminder-trigger"
             type="button"
-            onClick={() => {
-              setError("");
-              setEditorOpen(true);
-            }}
+            onClick={openCreateEditor}
           >
             + Add reminder
           </button>
@@ -979,8 +1058,15 @@ function RemindersPage({
                     Every {reminder.intervalValue} {reminder.intervalUnit}
                   </strong>
                   <span>{nextRunLabel(reminder)}</span>
+                  <small>{reminderDurationLabel(reminder.visibleForSeconds)}</small>
                 </div>
                 <div className="reminder-actions">
+                  <button
+                    type="button"
+                    onClick={() => openEditEditor(reminder)}
+                  >
+                    Edit
+                  </button>
                   <button
                     type="button"
                     onClick={() => void handleRunNow(reminder)}
@@ -1010,24 +1096,26 @@ function RemindersPage({
             className="reminder-editor"
             role="dialog"
             aria-modal="true"
-            aria-labelledby="new-reminder-title"
+            aria-labelledby="reminder-editor-title"
           >
             <div className="reminder-editor-header">
               <div>
-                <span>New reminder</span>
-                <h2 id="new-reminder-title">Schedule a pet message</h2>
+                <span>{editingId ? "Edit reminder" : "New reminder"}</span>
+                <h2 id="reminder-editor-title">
+                  {editingId ? "Update this pet message" : "Schedule a pet message"}
+                </h2>
               </div>
               <button
                 type="button"
                 aria-label="Close reminder editor"
                 title="Close"
-                onClick={() => setEditorOpen(false)}
+                onClick={closeEditor}
               >
                 x
               </button>
             </div>
 
-            <form onSubmit={handleCreateReminder}>
+            <form onSubmit={handleSaveReminder}>
               <label className="reminder-field">
                 <span>Title</span>
                 <input
@@ -1070,11 +1158,15 @@ function RemindersPage({
               <label className="reminder-field">
                 <span>Notification message</span>
                 <textarea
-                  maxLength={160}
+                  maxLength={MAX_REMINDER_MESSAGE_LENGTH}
                   value={message}
                   placeholder="Time to take a short water break."
                   onChange={(event) => setMessage(event.target.value)}
                 />
+                <small className="reminder-character-count">
+                  {message.length}/{MAX_REMINDER_MESSAGE_LENGTH} characters · Bubble
+                  expands automatically
+                </small>
               </label>
 
               <div className="reminder-frequency">
@@ -1114,10 +1206,26 @@ function RemindersPage({
                 </div>
               </div>
 
+              <label className="reminder-field">
+                <span>Bubble duration</span>
+                <select
+                  value={visibleForSeconds}
+                  onChange={(event) =>
+                    setVisibleForSeconds(Number(event.target.value))
+                  }
+                >
+                  {REMINDER_DURATION_OPTIONS.map((option) => (
+                    <option value={option.value} key={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
               {error && <div className="reminder-error">{error}</div>}
 
               <div className="reminder-editor-actions">
-                <button type="button" onClick={() => setEditorOpen(false)}>
+                <button type="button" onClick={closeEditor}>
                   Cancel
                 </button>
                 <button
@@ -1125,7 +1233,13 @@ function RemindersPage({
                   type="submit"
                   disabled={busy || !title.trim() || !message.trim()}
                 >
-                  {busy ? "Adding..." : "Add reminder"}
+                  {busy
+                    ? editingId
+                      ? "Saving..."
+                      : "Adding..."
+                    : editingId
+                      ? "Save changes"
+                      : "Add reminder"}
                 </button>
               </div>
             </form>

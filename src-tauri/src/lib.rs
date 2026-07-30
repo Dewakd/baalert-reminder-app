@@ -39,6 +39,8 @@ struct Reminder {
     interval_unit: String,
     #[serde(default = "default_reminder_animation")]
     animation: String,
+    #[serde(default = "default_reminder_visible_for_seconds")]
+    visible_for_seconds: u32,
     enabled: bool,
     next_run_at: u64,
 }
@@ -67,6 +69,18 @@ fn default_character_id() -> String {
 
 fn default_reminder_animation() -> String {
     "idle".to_string()
+}
+
+fn default_reminder_visible_for_seconds() -> u32 {
+    10
+}
+
+fn normalize_reminder_visible_for_seconds(seconds: u32) -> u32 {
+    if seconds == 0 {
+        0
+    } else {
+        seconds.clamp(2, 3600)
+    }
 }
 
 fn normalize_reminder_animation(animation: &str) -> String {
@@ -1001,6 +1015,7 @@ fn spawn_reminder_scheduler(
                                 reminder.title.clone(),
                                 reminder.message.clone(),
                                 reminder.animation.clone(),
+                                reminder.visible_for_seconds,
                             ));
                             reminder.next_run_at = now.saturating_add(interval);
                         }
@@ -1015,7 +1030,7 @@ fn spawn_reminder_scheduler(
             }
         }
 
-        for (title, message, animation) in due_reminders {
+        for (title, message, animation, visible_for_seconds) in due_reminders {
             let settings = pet_settings
                 .settings
                 .lock()
@@ -1031,6 +1046,7 @@ fn spawn_reminder_scheduler(
                 title,
                 message,
                 animation,
+                visible_for_seconds,
                 settings.pet_size,
                 settings.bubble_style,
             );
@@ -1044,6 +1060,7 @@ fn show_scheduled_reminder(
     title: String,
     message: String,
     animation: String,
+    visible_for_seconds: u32,
     pet_size: u32,
     bubble_style: String,
 ) {
@@ -1053,7 +1070,7 @@ fn show_scheduled_reminder(
             Some(title),
             message,
             0,
-            10,
+            visible_for_seconds,
             true,
             pet_size,
             bubble_style,
@@ -1142,10 +1159,11 @@ fn create_reminder(
     interval_value: u32,
     interval_unit: String,
     animation: String,
+    visible_for_seconds: u32,
 ) -> Result<Reminder, String> {
     let interval = reminder_interval_millis(interval_value, &interval_unit)?;
     let title: String = title.trim().chars().take(80).collect();
-    let message: String = message.trim().chars().take(160).collect();
+    let message: String = message.trim().chars().take(240).collect();
     if title.is_empty() {
         return Err("Reminder title is required".to_string());
     }
@@ -1166,6 +1184,7 @@ fn create_reminder(
         interval_value,
         interval_unit,
         animation: normalize_reminder_animation(&animation),
+        visible_for_seconds: normalize_reminder_visible_for_seconds(visible_for_seconds),
         enabled: true,
         next_run_at: now.saturating_add(interval),
     };
@@ -1177,6 +1196,51 @@ fn create_reminder(
     reminders.push(reminder.clone());
     persist_reminders(&repository, &reminders)?;
     Ok(reminder)
+}
+
+#[tauri::command]
+fn update_reminder(
+    repository: State<'_, ReminderRepository>,
+    id: String,
+    title: String,
+    message: String,
+    interval_value: u32,
+    interval_unit: String,
+    animation: String,
+    visible_for_seconds: u32,
+) -> Result<Reminder, String> {
+    let interval = reminder_interval_millis(interval_value, &interval_unit)?;
+    let title: String = title.trim().chars().take(80).collect();
+    let message: String = message.trim().chars().take(240).collect();
+    if title.is_empty() {
+        return Err("Reminder title is required".to_string());
+    }
+    if message.is_empty() {
+        return Err("Reminder message is required".to_string());
+    }
+
+    let mut reminders = repository
+        .reminders
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let reminder = reminders
+        .iter_mut()
+        .find(|reminder| reminder.id == id)
+        .ok_or_else(|| "Reminder not found".to_string())?;
+    let schedule_changed =
+        reminder.interval_value != interval_value || reminder.interval_unit != interval_unit;
+    reminder.title = title;
+    reminder.message = message;
+    reminder.interval_value = interval_value;
+    reminder.interval_unit = interval_unit;
+    reminder.animation = normalize_reminder_animation(&animation);
+    reminder.visible_for_seconds = normalize_reminder_visible_for_seconds(visible_for_seconds);
+    if reminder.enabled && schedule_changed {
+        reminder.next_run_at = current_time_millis().saturating_add(interval);
+    }
+    let updated = reminder.clone();
+    persist_reminders(&repository, &reminders)?;
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -1267,6 +1331,7 @@ fn trigger_reminder_now(
         reminder.title,
         reminder.message,
         reminder.animation,
+        reminder.visible_for_seconds,
         settings.pet_size,
         settings.bubble_style,
     );
@@ -1366,6 +1431,7 @@ struct PetLayout {
     image_size: CGFloat,
     bubble_x: CGFloat,
     bubble_y: CGFloat,
+    bubble_height: CGFloat,
     bubble_side: BubbleSide,
 }
 
@@ -1413,7 +1479,7 @@ fn bubble_theme(style: &str, dark_mode: bool) -> BubbleTheme {
 
 #[cfg(target_os = "macos")]
 impl PetLayout {
-    fn new(pet_size: u32, bubble_side: BubbleSide) -> Self {
+    fn new(pet_size: u32, bubble_side: BubbleSide, bubble_height: CGFloat) -> Self {
         let image_size = pet_size.clamp(MIN_PET_SIZE, MAX_PET_SIZE) as CGFloat;
         let image_x = match bubble_side {
             BubbleSide::Left => BUBBLE_WIDTH + 10.0,
@@ -1426,7 +1492,7 @@ impl PetLayout {
         };
         let bubble_y = image_y + image_size * 0.47;
         let panel_width = image_size + BUBBLE_WIDTH + 20.0;
-        let panel_height = (image_y + image_size + 32.0).max(bubble_y + BUBBLE_HEIGHT + 20.0);
+        let panel_height = (image_y + image_size + 32.0).max(bubble_y + bubble_height + 20.0);
 
         Self {
             panel_width,
@@ -1436,6 +1502,7 @@ impl PetLayout {
             image_size,
             bubble_x,
             bubble_y,
+            bubble_height,
             bubble_side,
         }
     }
@@ -1546,7 +1613,7 @@ struct PetInteractionState {
     animation_tick: u8,
     launched_at: Instant,
     bubble_show_delay: Duration,
-    bubble_visible_duration: Duration,
+    bubble_visible_duration: Option<Duration>,
     bubble_alpha: CGFloat,
     bubble_dismissed: bool,
     bubble_enabled: bool,
@@ -1572,13 +1639,31 @@ static LAST_PET_POSITION: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 #[cfg(target_os = "macos")]
 const BUBBLE_WIDTH: CGFloat = 364.0;
 #[cfg(target_os = "macos")]
-const BUBBLE_HEIGHT: CGFloat = 92.0;
+const MIN_BUBBLE_HEIGHT: CGFloat = 92.0;
+#[cfg(target_os = "macos")]
+const MAX_BUBBLE_HEIGHT: CGFloat = 282.0;
 #[cfg(target_os = "macos")]
 const BUBBLE_CLOSE_SIZE: CGFloat = 24.0;
 #[cfg(target_os = "macos")]
 const BUBBLE_CLOSE_MARGIN: CGFloat = 8.0;
 #[cfg(target_os = "macos")]
 const BUBBLE_FADE_STEP: CGFloat = 0.065;
+
+#[cfg(target_os = "macos")]
+fn native_bubble_height(message: &str) -> CGFloat {
+    let wrapped_lines = message
+        .lines()
+        .map(|line| {
+            line.chars()
+                .map(|character| if character.is_ascii() { 1 } else { 2 })
+                .sum::<usize>()
+                .max(1)
+                .div_ceil(42)
+        })
+        .sum::<usize>()
+        .clamp(1, 12);
+    (54.0 + wrapped_lines as CGFloat * 19.0).clamp(MIN_BUBBLE_HEIGHT, MAX_BUBBLE_HEIGHT)
+}
 
 #[cfg(target_os = "macos")]
 fn show_native_pet(
@@ -1633,7 +1718,9 @@ fn show_native_pet(
         animation_tick: 0,
         launched_at: Instant::now(),
         bubble_show_delay: Duration::from_secs(show_after_seconds.min(3600) as u64),
-        bubble_visible_duration: Duration::from_secs(visible_for_seconds.clamp(2, 3600) as u64),
+        bubble_visible_duration: (visible_for_seconds > 0).then(|| {
+            Duration::from_secs(normalize_reminder_visible_for_seconds(visible_for_seconds) as u64)
+        }),
         bubble_alpha: 0.0,
         bubble_dismissed: false,
         bubble_enabled: show_bubble,
@@ -1728,7 +1815,7 @@ fn hide_native_pet(app: &AppHandle) -> Result<(), String> {
 }
 
 fn sanitize_message(message: String) -> String {
-    let message: String = message.replace('\0', "").trim().chars().take(120).collect();
+    let message: String = message.replace('\0', "").trim().chars().take(240).collect();
 
     if message.is_empty() {
         "You have something coming up soon.".to_string()
@@ -1861,8 +1948,9 @@ unsafe fn create_native_pet_panel(
     }
 
     let visible_frame: CGRect = msg_send![screen, visibleFrame];
-    let right_layout = PetLayout::new(pet_size, BubbleSide::Right);
-    let left_layout = PetLayout::new(pet_size, BubbleSide::Left);
+    let bubble_height = native_bubble_height(message);
+    let right_layout = PetLayout::new(pet_size, BubbleSide::Right, bubble_height);
+    let left_layout = PetLayout::new(pet_size, BubbleSide::Left, bubble_height);
     let visible_right = visible_frame.origin.x + visible_frame.size.width;
     let default_pet_x = visible_right - right_layout.image_size - 32.0;
     let default_pet_y = visible_frame.origin.y + 48.0;
@@ -2104,7 +2192,7 @@ unsafe fn create_pet_content_view(
             layout.bubble_x,
             layout.bubble_y,
             BUBBLE_WIDTH,
-            BUBBLE_HEIGHT
+            layout.bubble_height
         )
     ];
     if bubble.is_null() {
@@ -2135,14 +2223,14 @@ unsafe fn create_pet_content_view(
     let _: () = msg_send![bubble_layer, setMasksToBounds: Bool::NO];
 
     let title = create_pet_text_field(
-        CGRect::new(20.0, 59.0, BUBBLE_WIDTH - 78.0, 18.0),
+        CGRect::new(20.0, layout.bubble_height - 33.0, BUBBLE_WIDTH - 78.0, 18.0),
         title_text,
         12.0,
         true,
         ink,
     )?;
     let text = create_pet_text_field(
-        CGRect::new(20.0, 16.0, BUBBLE_WIDTH - 40.0, 42.0),
+        CGRect::new(20.0, 12.0, BUBBLE_WIDTH - 40.0, layout.bubble_height - 48.0),
         message,
         15.0,
         true,
@@ -2155,7 +2243,7 @@ unsafe fn create_pet_content_view(
     let _: () = msg_send![text_cell, setLineBreakMode: 0usize];
 
     let close_x = BUBBLE_WIDTH - BUBBLE_CLOSE_MARGIN - BUBBLE_CLOSE_SIZE;
-    let close_y = BUBBLE_HEIGHT - BUBBLE_CLOSE_MARGIN - BUBBLE_CLOSE_SIZE;
+    let close_y = layout.bubble_height - BUBBLE_CLOSE_MARGIN - BUBBLE_CLOSE_SIZE;
     let close_alloc: *mut AnyObject = msg_send![view_class, alloc];
     let close_view: *mut AnyObject = msg_send![
         close_alloc,
@@ -2354,7 +2442,9 @@ unsafe fn update_pet_interaction(
     let bubble_should_show = state.bubble_enabled
         && !state.bubble_dismissed
         && elapsed >= state.bubble_show_delay
-        && elapsed < state.bubble_show_delay + state.bubble_visible_duration;
+        && state
+            .bubble_visible_duration
+            .is_none_or(|duration| elapsed < state.bubble_show_delay + duration);
     if bubble_should_show {
         state.bubble_alpha = (state.bubble_alpha + BUBBLE_FADE_STEP).min(1.0);
     } else {
@@ -2376,7 +2466,7 @@ unsafe fn update_pet_interaction(
     let over_pet = (layout.image_x..=layout.image_x + layout.image_size).contains(&local_x)
         && (layout.image_y..=layout.image_y + layout.image_size).contains(&local_y);
     let close_x = layout.bubble_x + BUBBLE_WIDTH - BUBBLE_CLOSE_MARGIN - BUBBLE_CLOSE_SIZE;
-    let close_y = layout.bubble_y + BUBBLE_HEIGHT - BUBBLE_CLOSE_MARGIN - BUBBLE_CLOSE_SIZE;
+    let close_y = layout.bubble_y + layout.bubble_height - BUBBLE_CLOSE_MARGIN - BUBBLE_CLOSE_SIZE;
     let over_close = state.bubble_alpha > 0.05
         && (close_x..=close_x + BUBBLE_CLOSE_SIZE).contains(&local_x)
         && (close_y..=close_y + BUBBLE_CLOSE_SIZE).contains(&local_y);
@@ -2604,7 +2694,7 @@ async fn show_pet(
             },
             message: sanitize_message(message),
             show_after_seconds: show_after_seconds.min(3600),
-            visible_for_seconds: visible_for_seconds.clamp(2, 3600),
+            visible_for_seconds: normalize_reminder_visible_for_seconds(visible_for_seconds),
             show_bubble,
             pet_size,
             bubble_style: normalize_bubble_style(&bubble_style),
@@ -2755,6 +2845,7 @@ pub fn run() {
             is_primary_mouse_button_pressed,
             list_reminders,
             create_reminder,
+            update_reminder,
             set_reminder_enabled,
             set_reminder_animation,
             delete_reminder,
@@ -2819,6 +2910,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reminder.animation, "idle");
+        assert_eq!(reminder.visible_for_seconds, 10);
+    }
+
+    #[test]
+    fn normalizes_reminder_bubble_duration() {
+        assert_eq!(normalize_reminder_visible_for_seconds(0), 0);
+        assert_eq!(normalize_reminder_visible_for_seconds(1), 2);
+        assert_eq!(normalize_reminder_visible_for_seconds(30), 30);
+        assert_eq!(normalize_reminder_visible_for_seconds(4_000), 3_600);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn expands_native_bubble_for_long_messages() {
+        let short = native_bubble_height("Take a break.");
+        let long = native_bubble_height(&"Long reminder text ".repeat(12));
+        assert_eq!(short, MIN_BUBBLE_HEIGHT);
+        assert!(long > short);
     }
 
     #[test]
