@@ -1,6 +1,6 @@
 [package]
 name = "baalert"
-version = "0.1.5"
+version = "0.1.6"
 description = "A desktop pet that delivers animated reminders"
 authors = ["you"]
 edition = "2021"

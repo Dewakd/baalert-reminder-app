@@ -23,7 +23,11 @@ type PetOverlayPayload = {
   visibleForSeconds: number;
   showBubble: boolean;
   petSize: number;
-  bubbleStyle: BubbleStyle;
+  bubbleColor: string;
+  bubbleTextMode: BubbleTextMode;
+  bubbleTextLimit: number;
+  bubbleFontSize: number;
+  bubbleWidth: number;
   reminderAnimation: string;
   soundDataUrl: string | null;
   soundVolume: number;
@@ -61,7 +65,11 @@ const DEFAULT_PET_OVERLAY: PetOverlayPayload = {
   visibleForSeconds: 10,
   showBubble: true,
   petSize: 152,
-  bubbleStyle: "lime",
+  bubbleColor: "#bfff4d",
+  bubbleTextMode: "dynamic",
+  bubbleTextLimit: 120,
+  bubbleFontSize: 15,
+  bubbleWidth: 364,
   reminderAnimation: "idle",
   soundDataUrl: null,
   soundVolume: 70,
@@ -71,13 +79,13 @@ const DEFAULT_PET_OVERLAY: PetOverlayPayload = {
 function normalizePetOverlayPayload(
   parsed: Partial<PetOverlayPayload>,
 ): PetOverlayPayload {
-  const bubbleStyle = ["lime", "pink", "yellow", "cyan"].includes(
-    parsed.bubbleStyle ?? "",
-  )
-    ? (parsed.bubbleStyle as BubbleStyle)
-    : DEFAULT_PET_OVERLAY.bubbleStyle;
-
   const visibleForSeconds = Number(parsed.visibleForSeconds);
+  const bubbleColor = normalizeBubbleColor(parsed.bubbleColor);
+  const bubbleTextMode = ["dynamic", "fixed", "limit"].includes(
+    parsed.bubbleTextMode ?? "",
+  )
+    ? (parsed.bubbleTextMode as BubbleTextMode)
+    : DEFAULT_PET_OVERLAY.bubbleTextMode;
 
   return {
     ...DEFAULT_PET_OVERLAY,
@@ -100,7 +108,20 @@ function normalizePetOverlayPayload(
       visibleForSeconds === 0
         ? 0
         : Math.min(3600, Math.max(2, visibleForSeconds || 10)),
-    bubbleStyle,
+    bubbleColor,
+    bubbleTextMode,
+    bubbleTextLimit: Math.min(
+      240,
+      Math.max(40, Number(parsed.bubbleTextLimit) || 120),
+    ),
+    bubbleFontSize: Math.min(
+      20,
+      Math.max(11, Number(parsed.bubbleFontSize) || 15),
+    ),
+    bubbleWidth: Math.min(
+      520,
+      Math.max(280, Number(parsed.bubbleWidth) || 364),
+    ),
     soundDataUrl:
       typeof parsed.soundDataUrl === "string" ? parsed.soundDataUrl : null,
     soundVolume: Math.min(
@@ -115,12 +136,28 @@ function normalizePetOverlayPayload(
   };
 }
 
+function normalizeBubbleColor(color: unknown) {
+  return typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color)
+    ? color.toLowerCase()
+    : "#bfff4d";
+}
+
+function bubbleInkColor(color: string) {
+  const normalized = normalizeBubbleColor(color);
+  const red = Number.parseInt(normalized.slice(1, 3), 16);
+  const green = Number.parseInt(normalized.slice(3, 5), 16);
+  const blue = Number.parseInt(normalized.slice(5, 7), 16);
+  const luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255;
+  return luminance > 0.58 ? "#17151c" : "#f5efff";
+}
+
 function createPetWindowLayout(
   mode: PetWindowLayoutMode,
   petSize: number,
   bubbleHeight = 92,
+  bubbleWidth = 364,
 ): PetWindowLayout {
-  const width = mode === "pet" ? petSize + 28 : petSize + 400;
+  const width = mode === "pet" ? petSize + 28 : petSize + bubbleWidth + 36;
   const height =
     mode === "pet"
       ? petSize + 28
@@ -385,11 +422,13 @@ function PetOverlay() {
             "right",
             payload.petSize,
             bubbleHeight,
+            payload.bubbleWidth,
           );
           const leftLayout = createPetWindowLayout(
             "left",
             payload.petSize,
             bubbleHeight,
+            payload.bubbleWidth,
           );
           const workArea = monitor?.workArea;
           const rightX = petScreenX - rightLayout.petX * scaleFactor;
@@ -436,7 +475,7 @@ function PetOverlay() {
         // Keep the last valid layout if the monitor changes during the update.
       }
     },
-    [appWindow, payload.petSize],
+    [appWindow, payload.bubbleWidth, payload.petSize],
   );
 
   useEffect(() => {
@@ -562,8 +601,16 @@ function PetOverlay() {
 
   return (
     <div
-      className={`pet-window-root pet-window-${payload.bubbleStyle} pet-window-bubble-${bubbleSide}${payload.darkMode ? " pet-window-dark" : ""}`}
-      style={{ "--pet-size": `${payload.petSize}px` } as CSSProperties}
+      className={`pet-window-root pet-window-text-${payload.bubbleTextMode} pet-window-bubble-${bubbleSide}${payload.darkMode ? " pet-window-dark" : ""}`}
+      style={
+        {
+          "--pet-size": `${payload.petSize}px`,
+          "--pet-bubble": payload.bubbleColor,
+          "--pet-ink": bubbleInkColor(payload.bubbleColor),
+          "--pet-bubble-width": `${payload.bubbleWidth}px`,
+          "--pet-font-size": `${payload.bubbleFontSize}px`,
+        } as CSSProperties
+      }
     >
       <img
         src={activeFrames[frameIndex % activeFrames.length]}
@@ -619,11 +666,46 @@ type Reminder = {
   nextRunAt: number;
 };
 
-type BubbleStyle = "lime" | "pink" | "yellow" | "cyan";
+type BubbleTextMode = "dynamic" | "fixed" | "limit";
+
+type BubbleCustomization = {
+  color: string;
+  textMode: BubbleTextMode;
+  textLimit: number;
+  fontSize: number;
+  width: number;
+};
+
+const DEFAULT_BUBBLE_CUSTOMIZATION: BubbleCustomization = {
+  color: "#bfff4d",
+  textMode: "dynamic",
+  textLimit: 120,
+  fontSize: 15,
+  width: 364,
+};
+
+function bubbleCustomizationFromSettings(
+  settings: PetSettings,
+): BubbleCustomization {
+  return {
+    color: normalizeBubbleColor(settings.bubbleColor),
+    textMode: ["dynamic", "fixed", "limit"].includes(settings.bubbleTextMode)
+      ? settings.bubbleTextMode
+      : "dynamic",
+    textLimit: Math.min(240, Math.max(40, settings.bubbleTextLimit || 120)),
+    fontSize: Math.min(20, Math.max(11, settings.bubbleFontSize || 15)),
+    width: Math.min(520, Math.max(280, settings.bubbleWidth || 364)),
+  };
+}
 
 type PetSettings = {
   petSize: number;
-  bubbleStyle: BubbleStyle;
+  bubbleStyle: string;
+  bubbleColor: string;
+  bubbleTextMode: BubbleTextMode;
+  bubbleTextLimit: number;
+  bubbleFontSize: number;
+  bubbleWidth: number;
   activeCharacterId: string;
   darkMode: boolean;
   soundEnabled: boolean;
@@ -696,16 +778,15 @@ type CharacterAnimationImportFile = {
   bytes: number[];
 };
 
-const BUBBLE_STYLES: {
-  id: BubbleStyle;
-  name: string;
-  description: string;
-}[] = [
-  { id: "lime", name: "Lime Punch", description: "Bright and energetic" },
-  { id: "pink", name: "Pink Pop", description: "Playful and bold" },
-  { id: "yellow", name: "Sunny Note", description: "Warm and direct" },
-  { id: "cyan", name: "Sky Signal", description: "Cool and crisp" },
-];
+const REMINDER_EMOJIS = ["💧", "⏰", "☕", "🧘", "💊", "📚", "💪", "🎯", "✅", "✨"];
+
+function textCharacterCount(value: string) {
+  return Array.from(value).length;
+}
+
+function limitTextCharacters(value: string, limit: number) {
+  return Array.from(value).slice(0, limit).join("");
+}
 
 const REMINDER_DURATION_OPTIONS = [
   { value: 5, label: "5 seconds" },
@@ -814,15 +895,18 @@ function RemindersPage({
   animations,
   soundCues,
   soundVolume,
+  bubbleCustomization,
 }: {
   onRemindersChange: (reminders: Reminder[]) => void;
   animations: CharacterAnimation[];
   soundCues: SoundCue[];
   soundVolume: number;
+  bubbleCustomization: BubbleCustomization;
 }) {
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [title, setTitle] = useState("");
   const [message, setMessage] = useState("");
+  const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const [intervalValue, setIntervalValue] = useState(30);
   const [intervalUnit, setIntervalUnit] = useState<"minutes" | "hours">(
     "minutes",
@@ -848,6 +932,10 @@ function RemindersPage({
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const reminderMessageLimit =
+    bubbleCustomization.textMode === "limit"
+      ? bubbleCustomization.textLimit
+      : MAX_REMINDER_MESSAGE_LENGTH;
 
   function updateReminderState(
     updater: (current: Reminder[]) => Reminder[],
@@ -892,6 +980,12 @@ function RemindersPage({
     }
   }, [soundCues, soundCueId]);
 
+  useEffect(() => {
+    setMessage((current) =>
+      limitTextCharacters(current, reminderMessageLimit),
+    );
+  }, [reminderMessageLimit]);
+
   useEffect(
     () => () => {
       soundPreview.current?.pause();
@@ -920,7 +1014,7 @@ function RemindersPage({
 
   function openEditEditor(reminder: Reminder) {
     setTitle(reminder.title);
-    setMessage(reminder.message);
+    setMessage(limitTextCharacters(reminder.message, reminderMessageLimit));
     setIntervalValue(reminder.intervalValue);
     setIntervalUnit(reminder.intervalUnit);
     setAnimation(reminder.animation);
@@ -930,6 +1024,25 @@ function RemindersPage({
     setEditingId(reminder.id);
     setError("");
     setEditorOpen(true);
+  }
+
+  function insertReminderEmoji(emoji: string) {
+    const input = messageInputRef.current;
+    const selectionStart = input?.selectionStart ?? message.length;
+    const selectionEnd = input?.selectionEnd ?? selectionStart;
+    const nextMessage = limitTextCharacters(
+      `${message.slice(0, selectionStart)}${emoji}${message.slice(selectionEnd)}`,
+      reminderMessageLimit,
+    );
+    setMessage(nextMessage);
+    window.requestAnimationFrame(() => {
+      const nextCursor = Math.min(
+        nextMessage.length,
+        selectionStart + emoji.length,
+      );
+      input?.focus();
+      input?.setSelectionRange(nextCursor, nextCursor);
+    });
   }
 
   function closeEditor() {
@@ -1283,14 +1396,38 @@ function RemindersPage({
               <label className="reminder-field">
                 <span>Notification message</span>
                 <textarea
-                  maxLength={MAX_REMINDER_MESSAGE_LENGTH}
+                  ref={messageInputRef}
                   value={message}
                   placeholder="Time to take a short water break."
-                  onChange={(event) => setMessage(event.target.value)}
+                  onChange={(event) =>
+                    setMessage(
+                      limitTextCharacters(
+                        event.target.value,
+                        reminderMessageLimit,
+                      ),
+                    )
+                  }
                 />
+                <div className="reminder-emoji-picker" aria-label="Add emoji">
+                  {REMINDER_EMOJIS.map((emoji) => (
+                    <button
+                      type="button"
+                      key={emoji}
+                      title={`Add ${emoji}`}
+                      aria-label={`Add ${emoji}`}
+                      onClick={() => insertReminderEmoji(emoji)}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
                 <small className="reminder-character-count">
-                  {message.length}/{MAX_REMINDER_MESSAGE_LENGTH} characters · Bubble
-                  expands automatically
+                  {textCharacterCount(message)}/{reminderMessageLimit} characters
+                  {bubbleCustomization.textMode === "dynamic"
+                    ? " · Bubble expands automatically"
+                    : bubbleCustomization.textMode === "fixed"
+                      ? " · Fixed bubble size"
+                      : " · Custom character limit"}
                 </small>
               </label>
 
@@ -1555,7 +1692,7 @@ function AppUpdateTool() {
 
 function SettingsPage({
   petSize,
-  bubbleStyle,
+  bubbleCustomization,
   soundEnabled,
   soundVolume,
   soundCues,
@@ -1567,7 +1704,7 @@ function SettingsPage({
   characterError,
   onPetSizePreview,
   onPetSizeCommit,
-  onBubbleStyleChange,
+  onBubbleCustomizationChange,
   onSoundSettingsChange,
   onSoundImport,
   onSoundDelete,
@@ -1578,7 +1715,7 @@ function SettingsPage({
   onCharacterDelete,
 }: {
   petSize: number;
-  bubbleStyle: BubbleStyle;
+  bubbleCustomization: BubbleCustomization;
   soundEnabled: boolean;
   soundVolume: number;
   soundCues: SoundCue[];
@@ -1590,7 +1727,9 @@ function SettingsPage({
   characterError: string;
   onPetSizePreview: (size: number) => void;
   onPetSizeCommit: (size: number) => void;
-  onBubbleStyleChange: (style: BubbleStyle) => void;
+  onBubbleCustomizationChange: (
+    customization: BubbleCustomization,
+  ) => Promise<void>;
   onSoundSettingsChange: (enabled: boolean, volume: number) => Promise<void>;
   onSoundImport: (sound: SoundCueImport) => Promise<void>;
   onSoundDelete: (soundCueId: string) => Promise<void>;
@@ -1630,6 +1769,9 @@ function SettingsPage({
   );
   const [localSoundError, setLocalSoundError] = useState("");
   const [draftSoundVolume, setDraftSoundVolume] = useState(soundVolume);
+  const [draftBubbleCustomization, setDraftBubbleCustomization] = useState(
+    bubbleCustomization,
+  );
   const [characterAnimationPreview, setCharacterAnimationPreview] = useState<{
     name: string;
     frames: string[];
@@ -1637,6 +1779,16 @@ function SettingsPage({
   const activeCharacter =
     characters.find((character) => character.id === activeCharacterId) ??
     characters[0];
+  const bubblePreviewWidth = Math.round(
+    240 + ((draftBubbleCustomization.width - 280) / 240) * 130,
+  );
+  const bubblePreviewMessage =
+    draftBubbleCustomization.textMode === "limit"
+      ? limitTextCharacters(
+          "Stand up, stretch, and take a short water break. 💧",
+          draftBubbleCustomization.textLimit,
+        )
+      : "Stand up, stretch, and take a short water break. 💧";
 
   useEffect(
     () => () => {
@@ -1646,6 +1798,19 @@ function SettingsPage({
   );
 
   useEffect(() => setDraftSoundVolume(soundVolume), [soundVolume]);
+
+  useEffect(
+    () => setDraftBubbleCustomization(bubbleCustomization),
+    [bubbleCustomization],
+  );
+
+  function commitBubbleCustomization(
+    patch: Partial<BubbleCustomization> = {},
+  ) {
+    const next = { ...draftBubbleCustomization, ...patch };
+    setDraftBubbleCustomization(next);
+    void onBubbleCustomizationChange(next);
+  }
 
   async function handleSoundPreview(soundCueId: string) {
     setPreviewingSoundCueId(soundCueId);
@@ -1888,11 +2053,17 @@ function SettingsPage({
       <section className="bubble-style-tool">
         <div className="reminder-section-heading">
           <div>
-            <h2>Chat bubble style</h2>
-            <p>Choose the color used when your pet delivers a reminder.</p>
+            <h2>Bubble customization</h2>
+            <p>Set the reminder bubble color, text layout, and dimensions.</p>
           </div>
-          <span className={`current-style-chip ${bubbleStyle}`}>
-            {BUBBLE_STYLES.find((style) => style.id === bubbleStyle)?.name}
+          <span
+            className="current-style-chip custom-color-chip"
+            style={{
+              background: draftBubbleCustomization.color,
+              color: bubbleInkColor(draftBubbleCustomization.color),
+            }}
+          >
+            {draftBubbleCustomization.color}
           </span>
         </div>
 
@@ -1901,34 +2072,185 @@ function SettingsPage({
             src={activeCharacter?.previewDataUrl || petIdle}
             alt="Pet with reminder preview"
           />
-          <div className={`bubble-theme-preview ${bubbleStyle}`}>
-            <button type="button" tabIndex={-1} aria-label="Close preview">
+          <div
+            className={`bubble-theme-preview bubble-preview-${draftBubbleCustomization.textMode}`}
+            style={{
+              width: bubblePreviewWidth,
+              maxWidth: "calc(100% - 88px)",
+              background: draftBubbleCustomization.color,
+              color: bubbleInkColor(draftBubbleCustomization.color),
+              fontSize: draftBubbleCustomization.fontSize,
+            }}
+          >
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label="Close preview"
+              style={{
+                background: bubbleInkColor(draftBubbleCustomization.color),
+                color: draftBubbleCustomization.color,
+              }}
+            >
               x
             </button>
             <strong>Stretch break</strong>
-            <span>Stand up and move around for a minute.</span>
+            <span>{bubblePreviewMessage}</span>
           </div>
         </div>
 
-        <div className="bubble-style-options" aria-label="Chat bubble style">
-          {BUBBLE_STYLES.map((style) => (
-            <button
-              type="button"
-              key={style.id}
-              className={`bubble-style-option ${style.id} ${
-                bubbleStyle === style.id ? "active" : ""
-              }`}
-              aria-pressed={bubbleStyle === style.id}
-              onClick={() => onBubbleStyleChange(style.id)}
-            >
-              <span className="bubble-style-swatch" />
+        <div className="bubble-customization-controls">
+          <label className="bubble-color-control">
+            <span>Bubble color</span>
+            <div>
+              <input
+                type="color"
+                value={draftBubbleCustomization.color}
+                aria-label="Custom bubble color"
+                onChange={(event) =>
+                  commitBubbleCustomization({ color: event.target.value })
+                }
+              />
+              <strong>{draftBubbleCustomization.color}</strong>
+            </div>
+          </label>
+
+          <div className="bubble-text-mode-control">
+            <span>Text behavior</span>
+            <div className="bubble-text-mode-options">
+              {([
+                ["dynamic", "Dynamic"],
+                ["fixed", "Fixed size"],
+                ["limit", "Character limit"],
+              ] as const).map(([mode, label]) => (
+                <button
+                  type="button"
+                  key={mode}
+                  className={
+                    draftBubbleCustomization.textMode === mode ? "active" : ""
+                  }
+                  aria-pressed={draftBubbleCustomization.textMode === mode}
+                  onClick={() => commitBubbleCustomization({ textMode: mode })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {draftBubbleCustomization.textMode === "limit" && (
+            <label className="bubble-range-control">
               <span>
-                <strong>{style.name}</strong>
-                <small>{style.description}</small>
+                Character limit <strong>{draftBubbleCustomization.textLimit}</strong>
               </span>
-              <b>{bubbleStyle === style.id ? "Selected" : "Choose"}</b>
-            </button>
-          ))}
+              <input
+                type="range"
+                min={40}
+                max={240}
+                step={10}
+                value={draftBubbleCustomization.textLimit}
+                onChange={(event) =>
+                  setDraftBubbleCustomization((current) => ({
+                    ...current,
+                    textLimit: Number(event.target.value),
+                  }))
+                }
+                onPointerUp={(event) =>
+                  commitBubbleCustomization({
+                    textLimit: Number(event.currentTarget.value),
+                  })
+                }
+                onKeyUp={(event) =>
+                  commitBubbleCustomization({
+                    textLimit: Number(event.currentTarget.value),
+                  })
+                }
+                onBlur={(event) =>
+                  commitBubbleCustomization({
+                    textLimit: Number(event.currentTarget.value),
+                  })
+                }
+              />
+            </label>
+          )}
+
+          <label className="bubble-range-control">
+            <span>
+              Font size <strong>{draftBubbleCustomization.fontSize}px</strong>
+            </span>
+            <input
+              type="range"
+              min={11}
+              max={20}
+              step={1}
+              value={draftBubbleCustomization.fontSize}
+              onChange={(event) =>
+                setDraftBubbleCustomization((current) => ({
+                  ...current,
+                  fontSize: Number(event.target.value),
+                }))
+              }
+              onPointerUp={(event) =>
+                commitBubbleCustomization({
+                  fontSize: Number(event.currentTarget.value),
+                })
+              }
+              onKeyUp={(event) =>
+                commitBubbleCustomization({
+                  fontSize: Number(event.currentTarget.value),
+                })
+              }
+              onBlur={(event) =>
+                commitBubbleCustomization({
+                  fontSize: Number(event.currentTarget.value),
+                })
+              }
+            />
+          </label>
+
+          <label className="bubble-range-control">
+            <span>
+              Bubble width <strong>{draftBubbleCustomization.width}px</strong>
+            </span>
+            <input
+              type="range"
+              min={280}
+              max={520}
+              step={4}
+              value={draftBubbleCustomization.width}
+              onChange={(event) =>
+                setDraftBubbleCustomization((current) => ({
+                  ...current,
+                  width: Number(event.target.value),
+                }))
+              }
+              onPointerUp={(event) =>
+                commitBubbleCustomization({
+                  width: Number(event.currentTarget.value),
+                })
+              }
+              onKeyUp={(event) =>
+                commitBubbleCustomization({
+                  width: Number(event.currentTarget.value),
+                })
+              }
+              onBlur={(event) =>
+                commitBubbleCustomization({
+                  width: Number(event.currentTarget.value),
+                })
+              }
+            />
+          </label>
+
+          <button
+            className="bubble-reset-button"
+            type="button"
+            onClick={() => {
+              setDraftBubbleCustomization(DEFAULT_BUBBLE_CUSTOMIZATION);
+              void onBubbleCustomizationChange(DEFAULT_BUBBLE_CUSTOMIZATION);
+            }}
+          >
+            Reset bubble
+          </button>
         </div>
       </section>
 
@@ -2569,7 +2891,9 @@ function Dashboard() {
   const [activePage, setActivePage] = useState<NavPage>("dashboard");
   const [petActive, setPetActive] = useState(false);
   const [petSize, setPetSize] = useState(152);
-  const [bubbleStyle, setBubbleStyle] = useState<BubbleStyle>("lime");
+  const [bubbleCustomization, setBubbleCustomization] = useState(
+    DEFAULT_BUBBLE_CUSTOMIZATION,
+  );
   const [darkMode, setDarkMode] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [soundVolume, setSoundVolume] = useState(70);
@@ -2603,7 +2927,7 @@ function Dashboard() {
             invoke<SoundCue[]>("list_sound_cues"),
           ]);
         setPetSize(settings.petSize);
-        setBubbleStyle(settings.bubbleStyle);
+        setBubbleCustomization(bubbleCustomizationFromSettings(settings));
         setDarkMode(settings.darkMode);
         setSoundEnabled(settings.soundEnabled);
         setSoundVolume(settings.soundVolume);
@@ -2667,7 +2991,7 @@ function Dashboard() {
           visibleForSeconds: 2,
           showBubble: false,
           petSize,
-          bubbleStyle,
+          bubbleStyle: "lime",
           reminderAnimation: null,
           soundCueId: null,
           soundVolume: null,
@@ -2697,7 +3021,7 @@ function Dashboard() {
           visibleForSeconds: 2,
           showBubble: false,
           petSize: settings.petSize,
-          bubbleStyle,
+          bubbleStyle: "lime",
           reminderAnimation: null,
           soundCueId: null,
           soundVolume: null,
@@ -2708,15 +3032,21 @@ function Dashboard() {
     }
   }
 
-  async function handleBubbleStyleChange(style: BubbleStyle) {
-    setBubbleStyle(style);
+  async function handleBubbleCustomizationChange(
+    customization: BubbleCustomization,
+  ) {
+    setBubbleCustomization(customization);
     try {
-      const settings = await invoke<PetSettings>("set_bubble_style", {
-        bubbleStyle: style,
+      const settings = await invoke<PetSettings>("set_bubble_customization", {
+        bubbleColor: customization.color,
+        bubbleTextMode: customization.textMode,
+        bubbleTextLimit: customization.textLimit,
+        bubbleFontSize: customization.fontSize,
+        bubbleWidth: customization.width,
       });
-      setBubbleStyle(settings.bubbleStyle);
+      setBubbleCustomization(bubbleCustomizationFromSettings(settings));
     } catch (err) {
-      console.error("Bubble style update error:", err);
+      console.error("Bubble customization update error:", err);
     }
   }
 
@@ -2794,7 +3124,7 @@ function Dashboard() {
       visibleForSeconds: 2,
       showBubble: false,
       petSize,
-      bubbleStyle,
+      bubbleStyle: "lime",
       reminderAnimation: null,
       soundCueId: null,
       soundVolume: null,
@@ -3166,13 +3496,14 @@ function Dashboard() {
               }
               soundCues={soundCues}
               soundVolume={soundVolume}
+              bubbleCustomization={bubbleCustomization}
             />
           )}
 
           {activePage === "settings" && (
             <SettingsPage
               petSize={petSize}
-              bubbleStyle={bubbleStyle}
+              bubbleCustomization={bubbleCustomization}
               soundEnabled={soundEnabled}
               soundVolume={soundVolume}
               soundCues={soundCues}
@@ -3184,9 +3515,7 @@ function Dashboard() {
               characterError={characterError}
               onPetSizePreview={setPetSize}
               onPetSizeCommit={(size) => void handlePetSizeCommit(size)}
-              onBubbleStyleChange={(style) =>
-                void handleBubbleStyleChange(style)
-              }
+              onBubbleCustomizationChange={handleBubbleCustomizationChange}
               onSoundSettingsChange={handleSoundSettingsChange}
               onSoundImport={handleSoundImport}
               onSoundDelete={handleSoundDelete}

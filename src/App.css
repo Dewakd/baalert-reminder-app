@@ -880,8 +880,8 @@ textarea:focus-visible,
 .reminder-editor form {
   display: flex;
   flex-direction: column;
-  gap: 13px;
-  padding: 18px;
+  gap: 10px;
+  padding: 14px 18px;
 }
 
 .reminder-field {
@@ -948,7 +948,7 @@ textarea:focus-visible,
 }
 
 .reminder-field textarea {
-  min-height: 94px;
+  min-height: 84px;
   padding: 11px;
   resize: vertical;
   line-height: 1.45;
@@ -960,6 +960,35 @@ textarea:focus-visible,
   font-size: 9px;
   font-weight: 750;
   line-height: 1.3;
+}
+
+.reminder-emoji-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.reminder-emoji-picker button {
+  display: grid;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 32px;
+  padding: 0;
+  place-items: center;
+  background: var(--paper);
+  border: var(--small-border);
+  border-radius: 3px;
+  box-shadow: 2px 2px 0 var(--shadow-ink);
+  font-size: 16px;
+}
+
+.reminder-emoji-picker button:hover {
+  background: var(--yellow);
+}
+
+.reminder-emoji-picker button:active {
+  box-shadow: none;
+  transform: translate(2px, 2px);
 }
 
 .reminder-field input::placeholder,
@@ -2035,9 +2064,156 @@ textarea:focus-visible,
 }
 
 .bubble-theme-preview > span {
-  font-size: 12px;
+  font-size: inherit;
   font-weight: 750;
   line-height: 1.35;
+}
+
+.bubble-preview-fixed {
+  height: 126px;
+  min-height: 126px;
+}
+
+.bubble-preview-fixed > span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.custom-color-chip {
+  min-width: 82px;
+  text-align: center;
+}
+
+.bubble-customization-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 13px;
+}
+
+.bubble-color-control,
+.bubble-text-mode-control,
+.bubble-range-control {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px;
+  background: var(--paper);
+  border: var(--small-border);
+  border-radius: 4px;
+}
+
+.bubble-color-control > span,
+.bubble-text-mode-control > span,
+.bubble-range-control > span {
+  font-size: 9px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.bubble-color-control > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.bubble-color-control input {
+  width: 48px;
+  height: 34px;
+  padding: 2px;
+  background: var(--white);
+  border: var(--small-border);
+  border-radius: 3px;
+}
+
+.bubble-color-control strong {
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.bubble-text-mode-control {
+  grid-column: 1 / -1;
+}
+
+.bubble-text-mode-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow: hidden;
+  border: var(--small-border);
+  border-radius: 3px;
+}
+
+.bubble-text-mode-options button {
+  min-height: 35px;
+  padding: 5px;
+  background: var(--white);
+  border: 0;
+  font-size: 8px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.bubble-text-mode-options button + button {
+  border-left: var(--small-border);
+}
+
+.bubble-text-mode-options button.active {
+  background: var(--purple);
+}
+
+.bubble-range-control > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.bubble-range-control input {
+  width: 100%;
+  height: 24px;
+  appearance: none;
+  background: transparent;
+}
+
+.bubble-range-control input::-webkit-slider-runnable-track {
+  height: 8px;
+  background: var(--cyan);
+  border: var(--small-border);
+  border-radius: 2px;
+}
+
+.bubble-range-control input::-webkit-slider-thumb {
+  width: 20px;
+  height: 20px;
+  margin-top: -8px;
+  appearance: none;
+  background: var(--lime);
+  border: var(--small-border);
+  border-radius: 2px;
+  box-shadow: 2px 2px 0 var(--shadow-ink);
+}
+
+.bubble-reset-button {
+  align-self: end;
+  justify-self: end;
+  min-height: 36px;
+  padding: 7px 10px;
+  background: var(--yellow);
+  border: var(--small-border);
+  border-radius: 3px;
+  box-shadow: 2px 2px 0 var(--shadow-ink);
+  font-size: 8px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.bubble-reset-button:active {
+  box-shadow: none;
+  transform: translate(2px, 2px);
 }
 
 .bubble-style-options {
@@ -2765,6 +2941,8 @@ body:has(.pet-window-root) #root {
   --pet-bubble: #bfff4d;
   --pet-ink: #17151c;
   --pet-shadow: #17151c;
+  --pet-bubble-width: 364px;
+  --pet-font-size: 15px;
   display: flex;
   width: 100vw;
   height: 100vh;
@@ -2834,7 +3012,7 @@ body:has(.pet-window-root) #root {
 .pet-window-bubble {
   position: relative;
   display: flex;
-  width: 344px;
+  width: var(--pet-bubble-width);
   min-height: 92px;
   flex-direction: column;
   justify-content: center;
@@ -2882,11 +3060,23 @@ body:has(.pet-window-root) #root {
 }
 
 .pet-window-bubble span {
-  font-size: 13px;
+  font-size: var(--pet-font-size);
   font-weight: 750;
   line-height: 1.35;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.pet-window-text-fixed .pet-window-bubble {
+  height: 124px;
+  min-height: 124px;
+}
+
+.pet-window-text-fixed .pet-window-bubble span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
 }
 
 .pet-window-bubble-close {

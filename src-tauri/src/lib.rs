@@ -75,9 +75,84 @@ const MAX_CHARACTER_FILES: usize = 500;
 const MAX_CHARACTER_BYTES: usize = 40 * 1024 * 1024;
 const MAX_SOUND_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_SOUND_CUE_ID: &str = "builtin-gentle-chime";
+const DEFAULT_BUBBLE_COLOR: &str = "#bfff4d";
+const DEFAULT_BUBBLE_TEXT_MODE: &str = "dynamic";
+const DEFAULT_BUBBLE_TEXT_LIMIT: u16 = 120;
+const DEFAULT_BUBBLE_FONT_SIZE: u16 = 15;
+const DEFAULT_BUBBLE_WIDTH: u32 = 364;
+const MIN_BUBBLE_TEXT_LIMIT: u16 = 40;
+const MAX_BUBBLE_TEXT_LIMIT: u16 = 240;
+const MIN_BUBBLE_FONT_SIZE: u16 = 11;
+const MAX_BUBBLE_FONT_SIZE: u16 = 20;
+const MIN_BUBBLE_WIDTH: u32 = 280;
+const MAX_BUBBLE_WIDTH: u32 = 520;
 
 fn default_bubble_style() -> String {
     "lime".to_string()
+}
+
+fn default_bubble_text_mode() -> String {
+    DEFAULT_BUBBLE_TEXT_MODE.to_string()
+}
+
+fn default_bubble_text_limit() -> u16 {
+    DEFAULT_BUBBLE_TEXT_LIMIT
+}
+
+fn default_bubble_font_size() -> u16 {
+    DEFAULT_BUBBLE_FONT_SIZE
+}
+
+fn default_bubble_width() -> u32 {
+    DEFAULT_BUBBLE_WIDTH
+}
+
+fn bubble_style_color(style: &str) -> &'static str {
+    match style {
+        "pink" => "#ff78c7",
+        "yellow" => "#ffd94a",
+        "cyan" => "#66ddff",
+        _ => DEFAULT_BUBBLE_COLOR,
+    }
+}
+
+fn normalize_bubble_color(color: &str) -> String {
+    let color = color.trim().to_ascii_lowercase();
+    if color.len() == 7
+        && color.starts_with('#')
+        && color[1..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        color
+    } else {
+        DEFAULT_BUBBLE_COLOR.to_string()
+    }
+}
+
+fn normalize_bubble_text_mode(mode: &str) -> String {
+    match mode.trim() {
+        "dynamic" | "fixed" | "limit" => mode.trim().to_string(),
+        _ => default_bubble_text_mode(),
+    }
+}
+
+fn apply_bubble_text_behavior(message: String, mode: &str, limit: u16) -> String {
+    let message = sanitize_message(message);
+    if normalize_bubble_text_mode(mode) != "limit" {
+        return message;
+    }
+
+    let limit = limit.clamp(MIN_BUBBLE_TEXT_LIMIT, MAX_BUBBLE_TEXT_LIMIT) as usize;
+    if message.chars().count() <= limit {
+        return message;
+    }
+
+    let text_limit = limit.saturating_sub(3);
+    format!(
+        "{}...",
+        message.chars().take(text_limit).collect::<String>()
+    )
 }
 
 fn default_character_id() -> String {
@@ -153,6 +228,16 @@ struct PetSettings {
     pet_size: u32,
     #[serde(default = "default_bubble_style")]
     bubble_style: String,
+    #[serde(default)]
+    bubble_color: String,
+    #[serde(default = "default_bubble_text_mode")]
+    bubble_text_mode: String,
+    #[serde(default = "default_bubble_text_limit")]
+    bubble_text_limit: u16,
+    #[serde(default = "default_bubble_font_size")]
+    bubble_font_size: u16,
+    #[serde(default = "default_bubble_width")]
+    bubble_width: u32,
     #[serde(default = "default_character_id")]
     active_character_id: String,
     #[serde(default)]
@@ -163,15 +248,73 @@ struct PetSettings {
     sound_volume: u8,
 }
 
+#[derive(Clone, Debug)]
+struct BubbleCustomization {
+    color: String,
+    text_mode: String,
+    text_limit: u16,
+    font_size: u16,
+    width: u32,
+    dark_mode: bool,
+}
+
+impl BubbleCustomization {
+    fn from_settings(settings: &PetSettings, legacy_style: &str) -> Self {
+        let color = if settings.bubble_color.trim().is_empty() {
+            bubble_style_color(legacy_style).to_string()
+        } else {
+            normalize_bubble_color(&settings.bubble_color)
+        };
+        Self {
+            color,
+            text_mode: normalize_bubble_text_mode(&settings.bubble_text_mode),
+            text_limit: settings
+                .bubble_text_limit
+                .clamp(MIN_BUBBLE_TEXT_LIMIT, MAX_BUBBLE_TEXT_LIMIT),
+            font_size: settings
+                .bubble_font_size
+                .clamp(MIN_BUBBLE_FONT_SIZE, MAX_BUBBLE_FONT_SIZE),
+            width: settings
+                .bubble_width
+                .clamp(MIN_BUBBLE_WIDTH, MAX_BUBBLE_WIDTH),
+            dark_mode: settings.dark_mode,
+        }
+    }
+}
+
 fn default_pet_settings() -> PetSettings {
     PetSettings {
         pet_size: DEFAULT_PET_SIZE,
         bubble_style: default_bubble_style(),
+        bubble_color: DEFAULT_BUBBLE_COLOR.to_string(),
+        bubble_text_mode: default_bubble_text_mode(),
+        bubble_text_limit: default_bubble_text_limit(),
+        bubble_font_size: default_bubble_font_size(),
+        bubble_width: default_bubble_width(),
         active_character_id: default_character_id(),
         dark_mode: false,
         sound_enabled: default_sound_enabled(),
         sound_volume: default_sound_volume(),
     }
+}
+
+fn normalize_pet_bubble_settings(settings: &mut PetSettings) {
+    settings.bubble_style = normalize_bubble_style(&settings.bubble_style);
+    settings.bubble_color = if settings.bubble_color.trim().is_empty() {
+        bubble_style_color(&settings.bubble_style).to_string()
+    } else {
+        normalize_bubble_color(&settings.bubble_color)
+    };
+    settings.bubble_text_mode = normalize_bubble_text_mode(&settings.bubble_text_mode);
+    settings.bubble_text_limit = settings
+        .bubble_text_limit
+        .clamp(MIN_BUBBLE_TEXT_LIMIT, MAX_BUBBLE_TEXT_LIMIT);
+    settings.bubble_font_size = settings
+        .bubble_font_size
+        .clamp(MIN_BUBBLE_FONT_SIZE, MAX_BUBBLE_FONT_SIZE);
+    settings.bubble_width = settings
+        .bubble_width
+        .clamp(MIN_BUBBLE_WIDTH, MAX_BUBBLE_WIDTH);
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -257,7 +400,11 @@ struct PetOverlayPayload {
     visible_for_seconds: u32,
     show_bubble: bool,
     pet_size: u32,
-    bubble_style: String,
+    bubble_color: String,
+    bubble_text_mode: String,
+    bubble_text_limit: u16,
+    bubble_font_size: u16,
+    bubble_width: u32,
     reminder_animation: String,
     sound_data_url: Option<String>,
     sound_volume: u8,
@@ -326,7 +473,7 @@ fn create_pet_settings_repository(app: &AppHandle) -> Result<PetSettingsReposito
         .and_then(|contents| serde_json::from_str::<PetSettings>(&contents).ok())
         .unwrap_or_else(default_pet_settings);
     settings.pet_size = settings.pet_size.clamp(MIN_PET_SIZE, MAX_PET_SIZE);
-    settings.bubble_style = normalize_bubble_style(&settings.bubble_style);
+    normalize_pet_bubble_settings(&mut settings);
     settings.sound_volume = settings.sound_volume.min(100);
     if settings.active_character_id.trim().is_empty()
         || settings.active_character_id == LEGACY_BUILTIN_CHARACTER_ID
@@ -1517,7 +1664,35 @@ fn set_bubble_style(
             .settings
             .lock()
             .map_err(|error| error.to_string())?;
+        settings.bubble_color = bubble_style_color(&bubble_style).to_string();
         settings.bubble_style = bubble_style;
+        settings.clone()
+    };
+    persist_pet_settings(&repository)?;
+    Ok(updated)
+}
+
+#[tauri::command]
+fn set_bubble_customization(
+    repository: State<'_, PetSettingsRepository>,
+    bubble_color: String,
+    bubble_text_mode: String,
+    bubble_text_limit: u16,
+    bubble_font_size: u16,
+    bubble_width: u32,
+) -> Result<PetSettings, String> {
+    let updated = {
+        let mut settings = repository
+            .settings
+            .lock()
+            .map_err(|error| error.to_string())?;
+        settings.bubble_color = normalize_bubble_color(&bubble_color);
+        settings.bubble_text_mode = normalize_bubble_text_mode(&bubble_text_mode);
+        settings.bubble_text_limit =
+            bubble_text_limit.clamp(MIN_BUBBLE_TEXT_LIMIT, MAX_BUBBLE_TEXT_LIMIT);
+        settings.bubble_font_size =
+            bubble_font_size.clamp(MIN_BUBBLE_FONT_SIZE, MAX_BUBBLE_FONT_SIZE);
+        settings.bubble_width = bubble_width.clamp(MIN_BUBBLE_WIDTH, MAX_BUBBLE_WIDTH);
         settings.clone()
     };
     persist_pet_settings(&repository)?;
@@ -1856,6 +2031,7 @@ struct PetLayout {
     image_size: CGFloat,
     bubble_x: CGFloat,
     bubble_y: CGFloat,
+    bubble_width: CGFloat,
     bubble_height: CGFloat,
     bubble_side: BubbleSide,
 }
@@ -1870,44 +2046,42 @@ struct BubbleTheme {
 }
 
 #[cfg(target_os = "macos")]
-fn bubble_theme(style: &str, dark_mode: bool) -> BubbleTheme {
-    if dark_mode {
-        let background = match style {
-            "pink" => (0.55, 0.22, 0.43, 1.0),
-            "yellow" => (0.45, 0.36, 0.07, 1.0),
-            "cyan" => (0.09, 0.38, 0.48, 1.0),
-            _ => (0.28, 0.41, 0.11, 1.0),
-        };
-
-        BubbleTheme {
-            background,
-            ink: (0.96, 0.94, 1.0, 1.0),
-            shadow: (0.01, 0.01, 0.02, 1.0),
-            close_text: (0.09, 0.08, 0.11, 1.0),
-        }
+fn bubble_theme(color: &str, dark_mode: bool) -> BubbleTheme {
+    let normalized = normalize_bubble_color(color);
+    let red = u8::from_str_radix(&normalized[1..3], 16).unwrap_or(191) as CGFloat / 255.0;
+    let green = u8::from_str_radix(&normalized[3..5], 16).unwrap_or(255) as CGFloat / 255.0;
+    let blue = u8::from_str_radix(&normalized[5..7], 16).unwrap_or(77) as CGFloat / 255.0;
+    let luminance = 0.299 * red + 0.587 * green + 0.114 * blue;
+    let ink = if luminance > 0.58 {
+        (0.09, 0.08, 0.11, 1.0)
     } else {
-        let background = match style {
-            "pink" => (1.0, 0.47, 0.78, 1.0),
-            "yellow" => (1.0, 0.85, 0.30, 1.0),
-            "cyan" => (0.40, 0.87, 0.99, 1.0),
-            _ => (0.75, 1.0, 0.30, 1.0),
-        };
+        (0.96, 0.94, 1.0, 1.0)
+    };
+    let shadow = if dark_mode {
+        (0.01, 0.01, 0.02, 1.0)
+    } else {
+        (0.09, 0.08, 0.11, 1.0)
+    };
 
-        BubbleTheme {
-            background,
-            ink: (0.09, 0.08, 0.11, 1.0),
-            shadow: (0.09, 0.08, 0.11, 1.0),
-            close_text: (1.0, 1.0, 1.0, 1.0),
-        }
+    BubbleTheme {
+        background: (red, green, blue, 1.0),
+        ink,
+        shadow,
+        close_text: (red, green, blue, 1.0),
     }
 }
 
 #[cfg(target_os = "macos")]
 impl PetLayout {
-    fn new(pet_size: u32, bubble_side: BubbleSide, bubble_height: CGFloat) -> Self {
+    fn new(
+        pet_size: u32,
+        bubble_side: BubbleSide,
+        bubble_width: CGFloat,
+        bubble_height: CGFloat,
+    ) -> Self {
         let image_size = pet_size.clamp(MIN_PET_SIZE, MAX_PET_SIZE) as CGFloat;
         let image_x = match bubble_side {
-            BubbleSide::Left => BUBBLE_WIDTH + 10.0,
+            BubbleSide::Left => bubble_width + 10.0,
             BubbleSide::Right => 10.0,
         };
         let image_y = 6.0;
@@ -1916,7 +2090,7 @@ impl PetLayout {
             BubbleSide::Right => image_size,
         };
         let bubble_y = image_y + image_size * 0.47;
-        let panel_width = image_size + BUBBLE_WIDTH + 20.0;
+        let panel_width = image_size + bubble_width + 20.0;
         let panel_height = (image_y + image_size + 32.0).max(bubble_y + bubble_height + 20.0);
 
         Self {
@@ -1927,6 +2101,7 @@ impl PetLayout {
             image_size,
             bubble_x,
             bubble_y,
+            bubble_width,
             bubble_height,
             bubble_side,
         }
@@ -2064,8 +2239,6 @@ static LAST_PET_POSITION: Mutex<Option<(CGFloat, CGFloat)>> = Mutex::new(None);
 static LAST_PET_POSITION: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 
 #[cfg(target_os = "macos")]
-const BUBBLE_WIDTH: CGFloat = 364.0;
-#[cfg(target_os = "macos")]
 const MIN_BUBBLE_HEIGHT: CGFloat = 92.0;
 #[cfg(target_os = "macos")]
 const MAX_BUBBLE_HEIGHT: CGFloat = 282.0;
@@ -2077,7 +2250,21 @@ const BUBBLE_CLOSE_MARGIN: CGFloat = 8.0;
 const BUBBLE_FADE_STEP: CGFloat = 0.065;
 
 #[cfg(target_os = "macos")]
-fn native_bubble_height(message: &str) -> CGFloat {
+fn native_bubble_height(
+    message: &str,
+    text_mode: &str,
+    bubble_width: u32,
+    font_size: u16,
+) -> CGFloat {
+    if normalize_bubble_text_mode(text_mode) == "fixed" {
+        return (104.0 + (font_size.saturating_sub(11) as CGFloat * 3.0))
+            .clamp(MIN_BUBBLE_HEIGHT, MAX_BUBBLE_HEIGHT);
+    }
+
+    let usable_width = bubble_width.clamp(MIN_BUBBLE_WIDTH, MAX_BUBBLE_WIDTH) as CGFloat - 40.0;
+    let character_width =
+        font_size.clamp(MIN_BUBBLE_FONT_SIZE, MAX_BUBBLE_FONT_SIZE) as CGFloat * 0.58;
+    let characters_per_line = (usable_width / character_width).floor().max(12.0) as usize;
     let wrapped_lines = message
         .lines()
         .map(|line| {
@@ -2085,11 +2272,12 @@ fn native_bubble_height(message: &str) -> CGFloat {
                 .map(|character| if character.is_ascii() { 1 } else { 2 })
                 .sum::<usize>()
                 .max(1)
-                .div_ceil(42)
+                .div_ceil(characters_per_line)
         })
         .sum::<usize>()
         .clamp(1, 12);
-    (54.0 + wrapped_lines as CGFloat * 19.0).clamp(MIN_BUBBLE_HEIGHT, MAX_BUBBLE_HEIGHT)
+    let line_height = font_size as CGFloat * 1.35;
+    (54.0 + wrapped_lines as CGFloat * line_height).clamp(MIN_BUBBLE_HEIGHT, MAX_BUBBLE_HEIGHT)
 }
 
 #[cfg(target_os = "macos")]
@@ -2149,7 +2337,7 @@ fn show_native_pet(
     visible_for_seconds: u32,
     show_bubble: bool,
     pet_size: u32,
-    bubble_style: String,
+    bubble_customization: BubbleCustomization,
     reminder_animation: Option<String>,
 ) -> Result<(), String> {
     hide_native_pet(&app)?;
@@ -2163,16 +2351,21 @@ fn show_native_pet(
     } else {
         title
     };
-    let message = sanitize_message(message);
-    let dark_mode = app
-        .state::<PetSettingsRepository>()
-        .settings
-        .lock()
-        .map(|settings| settings.dark_mode)
-        .unwrap_or(false);
-    let theme = bubble_theme(&bubble_style, dark_mode);
-    let info =
-        create_native_pet_on_main_thread(&app, frame_paths, title, message, pet_size, theme)?;
+    let message = apply_bubble_text_behavior(
+        message,
+        &bubble_customization.text_mode,
+        bubble_customization.text_limit,
+    );
+    let theme = bubble_theme(&bubble_customization.color, bubble_customization.dark_mode);
+    let info = create_native_pet_on_main_thread(
+        &app,
+        frame_paths,
+        title,
+        message,
+        pet_size,
+        bubble_customization,
+        theme,
+    )?;
     let layout = info.layout;
     let reminder_animation = reminder_animation
         .as_deref()
@@ -2388,6 +2581,7 @@ fn create_native_pet_on_main_thread(
     title: String,
     message: String,
     pet_size: u32,
+    bubble_customization: BubbleCustomization,
     theme: BubbleTheme,
 ) -> Result<NativePetPanelInfo, String> {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -2395,8 +2589,16 @@ fn create_native_pet_on_main_thread(
 
     runner
         .run_on_main_thread(move || {
-            let result =
-                unsafe { create_native_pet_panel(&frame_paths, &title, &message, pet_size, theme) };
+            let result = unsafe {
+                create_native_pet_panel(
+                    &frame_paths,
+                    &title,
+                    &message,
+                    pet_size,
+                    &bubble_customization,
+                    theme,
+                )
+            };
             let _ = tx.send(result);
         })
         .map_err(|e| e.to_string())?;
@@ -2411,6 +2613,7 @@ unsafe fn create_native_pet_panel(
     title: &str,
     message: &str,
     pet_size: u32,
+    bubble_customization: &BubbleCustomization,
     theme: BubbleTheme,
 ) -> Result<NativePetPanelInfo, String> {
     use objc2::msg_send;
@@ -2423,9 +2626,15 @@ unsafe fn create_native_pet_panel(
     }
 
     let visible_frame: CGRect = msg_send![screen, visibleFrame];
-    let bubble_height = native_bubble_height(message);
-    let right_layout = PetLayout::new(pet_size, BubbleSide::Right, bubble_height);
-    let left_layout = PetLayout::new(pet_size, BubbleSide::Left, bubble_height);
+    let bubble_height = native_bubble_height(
+        message,
+        &bubble_customization.text_mode,
+        bubble_customization.width,
+        bubble_customization.font_size,
+    );
+    let bubble_width = bubble_customization.width as CGFloat;
+    let right_layout = PetLayout::new(pet_size, BubbleSide::Right, bubble_width, bubble_height);
+    let left_layout = PetLayout::new(pet_size, BubbleSide::Left, bubble_width, bubble_height);
     let visible_right = visible_frame.origin.x + visible_frame.size.width;
     let default_pet_x = visible_right - right_layout.image_size - 32.0;
     let default_pet_y = visible_frame.origin.y + 48.0;
@@ -2499,7 +2708,14 @@ unsafe fn create_native_pet_panel(
     let _: () = msg_send![panel, setWorksWhenModal: Bool::YES];
     let _: () = msg_send![panel, setBecomesKeyOnlyIfNeeded: Bool::YES];
 
-    let content = match create_pet_content_view(frame_paths, title, message, layout, theme) {
+    let content = match create_pet_content_view(
+        frame_paths,
+        title,
+        message,
+        layout,
+        bubble_customization,
+        theme,
+    ) {
         Ok(content) => content,
         Err(error) => {
             let _: () = msg_send![panel, release];
@@ -2526,6 +2742,7 @@ unsafe fn create_pet_content_view(
     title_text: &str,
     message: &str,
     layout: PetLayout,
+    bubble_customization: &BubbleCustomization,
     theme: BubbleTheme,
 ) -> Result<NativePetContent, String> {
     use objc2::msg_send;
@@ -2642,8 +2859,8 @@ unsafe fn create_pet_content_view(
 
     let (large_dot_x, small_dot_x) = match layout.bubble_side {
         BubbleSide::Left => (
-            layout.bubble_x + BUBBLE_WIDTH,
-            layout.bubble_x + BUBBLE_WIDTH - 4.0,
+            layout.bubble_x + layout.bubble_width,
+            layout.bubble_x + layout.bubble_width - 4.0,
         ),
         BubbleSide::Right => (layout.bubble_x - 13.0, layout.bubble_x - 4.0),
     };
@@ -2666,7 +2883,7 @@ unsafe fn create_pet_content_view(
         initWithFrame: CGRect::new(
             layout.bubble_x,
             layout.bubble_y,
-            BUBBLE_WIDTH,
+            layout.bubble_width,
             layout.bubble_height
         )
     ];
@@ -2698,16 +2915,26 @@ unsafe fn create_pet_content_view(
     let _: () = msg_send![bubble_layer, setMasksToBounds: Bool::NO];
 
     let title = create_pet_text_field(
-        CGRect::new(20.0, layout.bubble_height - 33.0, BUBBLE_WIDTH - 78.0, 18.0),
+        CGRect::new(
+            20.0,
+            layout.bubble_height - 33.0,
+            layout.bubble_width - 78.0,
+            18.0,
+        ),
         title_text,
         12.0,
         true,
         ink,
     )?;
     let text = create_pet_text_field(
-        CGRect::new(20.0, 12.0, BUBBLE_WIDTH - 40.0, layout.bubble_height - 48.0),
+        CGRect::new(
+            20.0,
+            12.0,
+            layout.bubble_width - 40.0,
+            layout.bubble_height - 48.0,
+        ),
         message,
-        15.0,
+        bubble_customization.font_size as CGFloat,
         true,
         ink,
     )?;
@@ -2715,9 +2942,14 @@ unsafe fn create_pet_content_view(
     let _: () = msg_send![text_cell, setWraps: Bool::YES];
     let _: () = msg_send![text_cell, setScrollable: Bool::NO];
     let _: () = msg_send![text_cell, setUsesSingleLineMode: Bool::NO];
-    let _: () = msg_send![text_cell, setLineBreakMode: 0usize];
+    let line_break_mode = if bubble_customization.text_mode == "fixed" {
+        4usize // NSLineBreakByTruncatingTail
+    } else {
+        0usize // NSLineBreakByWordWrapping
+    };
+    let _: () = msg_send![text_cell, setLineBreakMode: line_break_mode];
 
-    let close_x = BUBBLE_WIDTH - BUBBLE_CLOSE_MARGIN - BUBBLE_CLOSE_SIZE;
+    let close_x = layout.bubble_width - BUBBLE_CLOSE_MARGIN - BUBBLE_CLOSE_SIZE;
     let close_y = layout.bubble_height - BUBBLE_CLOSE_MARGIN - BUBBLE_CLOSE_SIZE;
     let close_alloc: *mut AnyObject = msg_send![view_class, alloc];
     let close_view: *mut AnyObject = msg_send![
@@ -2940,7 +3172,7 @@ unsafe fn update_pet_interaction(
     let local_y = cursor.y - panel_frame.origin.y;
     let over_pet = (layout.image_x..=layout.image_x + layout.image_size).contains(&local_x)
         && (layout.image_y..=layout.image_y + layout.image_size).contains(&local_y);
-    let close_x = layout.bubble_x + BUBBLE_WIDTH - BUBBLE_CLOSE_MARGIN - BUBBLE_CLOSE_SIZE;
+    let close_x = layout.bubble_x + layout.bubble_width - BUBBLE_CLOSE_MARGIN - BUBBLE_CLOSE_SIZE;
     let close_y = layout.bubble_y + layout.bubble_height - BUBBLE_CLOSE_MARGIN - BUBBLE_CLOSE_SIZE;
     let over_close = state.bubble_alpha > 0.05
         && (close_x..=close_x + BUBBLE_CLOSE_SIZE).contains(&local_x)
@@ -3160,6 +3392,14 @@ async fn show_pet(
     sound_cue_id: Option<String>,
     sound_volume: Option<u8>,
 ) -> Result<(), String> {
+    let settings = app
+        .state::<PetSettingsRepository>()
+        .settings
+        .lock()
+        .map(|settings| settings.clone())
+        .unwrap_or_else(|_| default_pet_settings());
+    let bubble_customization = BubbleCustomization::from_settings(&settings, &bubble_style);
+
     #[cfg(target_os = "macos")]
     {
         if let Some(sound_cue_id) = sound_cue_id.as_deref() {
@@ -3173,7 +3413,7 @@ async fn show_pet(
             visible_for_seconds,
             show_bubble,
             pet_size,
-            bubble_style,
+            bubble_customization,
             reminder_animation,
         );
     }
@@ -3199,12 +3439,11 @@ async fn show_pet(
             .chars()
             .take(48)
             .collect();
-        let dark_mode = app
-            .state::<PetSettingsRepository>()
-            .settings
-            .lock()
-            .map(|settings| settings.dark_mode)
-            .unwrap_or(false);
+        let message = apply_bubble_text_behavior(
+            message,
+            &bubble_customization.text_mode,
+            bubble_customization.text_limit,
+        );
         let payload = PetOverlayPayload {
             revision: current_time_millis(),
             title: if title.is_empty() {
@@ -3212,19 +3451,23 @@ async fn show_pet(
             } else {
                 title
             },
-            message: sanitize_message(message),
+            message,
             show_after_seconds: show_after_seconds.min(3600),
             visible_for_seconds: normalize_reminder_visible_for_seconds(visible_for_seconds),
             show_bubble,
             pet_size,
-            bubble_style: normalize_bubble_style(&bubble_style),
+            bubble_color: bubble_customization.color,
+            bubble_text_mode: bubble_customization.text_mode,
+            bubble_text_limit: bubble_customization.text_limit,
+            bubble_font_size: bubble_customization.font_size,
+            bubble_width: bubble_customization.width,
             reminder_animation: reminder_animation
                 .as_deref()
                 .map(normalize_reminder_animation)
                 .unwrap_or_else(default_reminder_animation),
             sound_data_url,
             sound_volume: sound_volume.unwrap_or(70).min(100),
-            dark_mode,
+            dark_mode: bubble_customization.dark_mode,
         };
 
         if let Some(existing) = app.get_webview_window("pet") {
@@ -3375,6 +3618,7 @@ pub fn run() {
             get_pet_settings,
             set_pet_size,
             set_bubble_style,
+            set_bubble_customization,
             set_dark_mode,
             set_sound_settings,
             list_sound_cues,
@@ -3443,8 +3687,8 @@ mod tests {
     }
 
     #[test]
-    fn migrates_existing_pet_settings_to_sound_defaults() {
-        let settings: PetSettings = serde_json::from_str(
+    fn migrates_existing_pet_settings_to_new_defaults() {
+        let mut settings: PetSettings = serde_json::from_str(
             r#"{
                 "petSize": 152,
                 "bubbleStyle": "pink",
@@ -3453,8 +3697,30 @@ mod tests {
             }"#,
         )
         .unwrap();
+        normalize_pet_bubble_settings(&mut settings);
         assert!(settings.sound_enabled);
         assert_eq!(settings.sound_volume, 70);
+        assert_eq!(settings.bubble_color, "#ff78c7");
+        assert_eq!(settings.bubble_text_mode, "dynamic");
+        assert_eq!(settings.bubble_text_limit, 120);
+        assert_eq!(settings.bubble_font_size, 15);
+        assert_eq!(settings.bubble_width, 364);
+    }
+
+    #[test]
+    fn normalizes_custom_bubble_colors() {
+        assert_eq!(normalize_bubble_color("#12ABef"), "#12abef");
+        assert_eq!(normalize_bubble_color("blue"), DEFAULT_BUBBLE_COLOR);
+        assert_eq!(normalize_bubble_color("#12345"), DEFAULT_BUBBLE_COLOR);
+    }
+
+    #[test]
+    fn limits_bubble_text_without_removing_emoji() {
+        let message = format!("Drink water {} {}", '\u{1f4a7}', "and stretch ".repeat(8));
+        let limited = apply_bubble_text_behavior(message, "limit", 40);
+        assert!(limited.contains('\u{1f4a7}'));
+        assert_eq!(limited.chars().count(), 40);
+        assert!(limited.ends_with("..."));
     }
 
     #[test]
@@ -3496,10 +3762,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn expands_native_bubble_for_long_messages() {
-        let short = native_bubble_height("Take a break.");
-        let long = native_bubble_height(&"Long reminder text ".repeat(12));
+        let short = native_bubble_height("Take a break.", "dynamic", 364, 15);
+        let long = native_bubble_height(&"Long reminder text ".repeat(12), "dynamic", 364, 15);
+        let fixed = native_bubble_height(&"Long reminder text ".repeat(12), "fixed", 364, 15);
         assert_eq!(short, MIN_BUBBLE_HEIGHT);
         assert!(long > short);
+        assert!(fixed < long);
     }
 
     #[test]
