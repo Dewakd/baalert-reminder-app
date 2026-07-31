@@ -29,6 +29,17 @@ extern "system" {
     fn GetAsyncKeyState(v_key: i32) -> i16;
 }
 
+#[cfg(target_os = "windows")]
+#[link(name = "winmm")]
+extern "system" {
+    fn mciSendStringW(
+        command: *const u16,
+        return_value: *mut u16,
+        return_length: u32,
+        callback: usize,
+    ) -> u32;
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Reminder {
@@ -41,6 +52,10 @@ struct Reminder {
     animation: String,
     #[serde(default = "default_reminder_visible_for_seconds")]
     visible_for_seconds: u32,
+    #[serde(default)]
+    sound_enabled: bool,
+    #[serde(default = "default_sound_cue_id")]
+    sound_cue_id: String,
     enabled: bool,
     next_run_at: u64,
 }
@@ -58,6 +73,8 @@ const BUILTIN_CHARACTER_ID: &str = "builtin-baalert";
 const LEGACY_BUILTIN_CHARACTER_ID: &str = "builtin-flyingsheep";
 const MAX_CHARACTER_FILES: usize = 500;
 const MAX_CHARACTER_BYTES: usize = 40 * 1024 * 1024;
+const MAX_SOUND_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_SOUND_CUE_ID: &str = "builtin-gentle-chime";
 
 fn default_bubble_style() -> String {
     "lime".to_string()
@@ -69,6 +86,31 @@ fn default_character_id() -> String {
 
 fn default_reminder_animation() -> String {
     "idle".to_string()
+}
+
+fn default_sound_cue_id() -> String {
+    DEFAULT_SOUND_CUE_ID.to_string()
+}
+
+fn default_sound_enabled() -> bool {
+    true
+}
+
+fn default_sound_volume() -> u8 {
+    70
+}
+
+fn normalize_sound_cue_id(id: &str) -> String {
+    let id = id.trim();
+    if matches!(
+        id,
+        "builtin-gentle-chime" | "builtin-bright-pop" | "builtin-soft-bell"
+    ) || (id.starts_with("custom-") && is_safe_character_id(id))
+    {
+        id.to_string()
+    } else {
+        default_sound_cue_id()
+    }
 }
 
 fn default_reminder_visible_for_seconds() -> u32 {
@@ -115,6 +157,21 @@ struct PetSettings {
     active_character_id: String,
     #[serde(default)]
     dark_mode: bool,
+    #[serde(default = "default_sound_enabled")]
+    sound_enabled: bool,
+    #[serde(default = "default_sound_volume")]
+    sound_volume: u8,
+}
+
+fn default_pet_settings() -> PetSettings {
+    PetSettings {
+        pet_size: DEFAULT_PET_SIZE,
+        bubble_style: default_bubble_style(),
+        active_character_id: default_character_id(),
+        dark_mode: false,
+        sound_enabled: default_sound_enabled(),
+        sound_volume: default_sound_volume(),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -138,6 +195,24 @@ struct CharacterManifest {
     id: String,
     name: String,
     imported_at: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomSoundCueManifest {
+    id: String,
+    name: String,
+    file_name: String,
+    imported_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SoundCueSummary {
+    id: String,
+    name: String,
+    is_builtin: bool,
+    format: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -184,6 +259,8 @@ struct PetOverlayPayload {
     pet_size: u32,
     bubble_style: String,
     reminder_animation: String,
+    sound_data_url: Option<String>,
+    sound_volume: u8,
     dark_mode: bool,
 }
 
@@ -247,14 +324,10 @@ fn create_pet_settings_repository(app: &AppHandle) -> Result<PetSettingsReposito
     let mut settings = fs::read_to_string(&path)
         .ok()
         .and_then(|contents| serde_json::from_str::<PetSettings>(&contents).ok())
-        .unwrap_or(PetSettings {
-            pet_size: DEFAULT_PET_SIZE,
-            bubble_style: default_bubble_style(),
-            active_character_id: default_character_id(),
-            dark_mode: false,
-        });
+        .unwrap_or_else(default_pet_settings);
     settings.pet_size = settings.pet_size.clamp(MIN_PET_SIZE, MAX_PET_SIZE);
     settings.bubble_style = normalize_bubble_style(&settings.bubble_style);
+    settings.sound_volume = settings.sound_volume.min(100);
     if settings.active_character_id.trim().is_empty()
         || settings.active_character_id == LEGACY_BUILTIN_CHARACTER_ID
     {
@@ -285,6 +358,319 @@ fn characters_directory(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map_err(|error| error.to_string())?
         .join("characters"))
+}
+
+fn sounds_directory(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("sounds"))
+}
+
+fn sound_manifest_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(sounds_directory(app)?.join("library.json"))
+}
+
+fn builtin_sound_cues() -> Vec<SoundCueSummary> {
+    [
+        ("builtin-gentle-chime", "Gentle Chime"),
+        ("builtin-bright-pop", "Bright Pop"),
+        ("builtin-soft-bell", "Soft Bell"),
+    ]
+    .into_iter()
+    .map(|(id, name)| SoundCueSummary {
+        id: id.to_string(),
+        name: name.to_string(),
+        is_builtin: true,
+        format: "WAV".to_string(),
+    })
+    .collect()
+}
+
+fn read_custom_sound_manifest(app: &AppHandle) -> Vec<CustomSoundCueManifest> {
+    sound_manifest_path(app)
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_default()
+}
+
+fn persist_custom_sound_manifest(
+    app: &AppHandle,
+    sounds: &[CustomSoundCueManifest],
+) -> Result<(), String> {
+    let directory = sounds_directory(app)?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let json = serde_json::to_string_pretty(sounds).map_err(|error| error.to_string())?;
+    fs::write(directory.join("library.json"), json).map_err(|error| error.to_string())
+}
+
+fn sound_file_format(file_name: &str) -> Option<(&'static str, &'static str)> {
+    match Path::new(file_name)
+        .extension()
+        .and_then(|extension| extension.to_str())?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mp3" => Some(("mp3", "audio/mpeg")),
+        "wav" => Some(("wav", "audio/wav")),
+        _ => None,
+    }
+}
+
+fn validate_sound_file(
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<(&'static str, &'static str), String> {
+    if bytes.is_empty() {
+        return Err("The selected sound file is empty".to_string());
+    }
+    if bytes.len() > MAX_SOUND_BYTES {
+        return Err("Sound files must stay under 8 MB".to_string());
+    }
+
+    let (extension, mime) = sound_file_format(file_name)
+        .ok_or_else(|| "Choose an MP3 or WAV sound file".to_string())?;
+    let valid_header = match extension {
+        "mp3" => {
+            bytes.starts_with(b"ID3")
+                || bytes
+                    .get(..2)
+                    .is_some_and(|header| header[0] == 0xff && header[1] & 0xe0 == 0xe0)
+        }
+        "wav" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WAVE"),
+        _ => false,
+    };
+
+    if valid_header {
+        Ok((extension, mime))
+    } else {
+        Err(format!(
+            "{} does not appear to be a valid {extension} file",
+            file_name
+        ))
+    }
+}
+
+fn wav_bytes(duration_seconds: f32, tones: &[(f32, f32, f32, f32)]) -> Vec<u8> {
+    const SAMPLE_RATE: u32 = 44_100;
+    const CHANNELS: u16 = 1;
+    const BITS_PER_SAMPLE: u16 = 16;
+
+    let sample_count = (duration_seconds * SAMPLE_RATE as f32).ceil() as usize;
+    let mut samples = Vec::with_capacity(sample_count);
+    for index in 0..sample_count {
+        let time = index as f32 / SAMPLE_RATE as f32;
+        let mut value = 0.0f32;
+        for &(start, duration, frequency, amplitude) in tones {
+            if !(start..start + duration).contains(&time) {
+                continue;
+            }
+            let local_time = time - start;
+            let progress = local_time / duration;
+            let attack = (local_time / 0.018).min(1.0);
+            let envelope = attack * (1.0 - progress).powf(2.2);
+            let phase = std::f32::consts::TAU * frequency * local_time;
+            value += amplitude * envelope * (phase.sin() + 0.22 * (phase * 2.0).sin());
+        }
+        samples.push((value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+    }
+
+    let data_size = (samples.len() * 2) as u32;
+    let mut bytes = Vec::with_capacity(44 + data_size as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&CHANNELS.to_le_bytes());
+    bytes.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    bytes.extend_from_slice(&(SAMPLE_RATE * CHANNELS as u32 * 2).to_le_bytes());
+    bytes.extend_from_slice(&(CHANNELS * 2).to_le_bytes());
+    bytes.extend_from_slice(&BITS_PER_SAMPLE.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_size.to_le_bytes());
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
+fn builtin_sound_bytes(id: &str) -> Option<Vec<u8>> {
+    match id {
+        "builtin-gentle-chime" => Some(wav_bytes(
+            0.95,
+            &[
+                (0.00, 0.46, 523.25, 0.34),
+                (0.18, 0.46, 659.25, 0.30),
+                (0.36, 0.56, 783.99, 0.27),
+            ],
+        )),
+        "builtin-bright-pop" => Some(wav_bytes(
+            0.42,
+            &[(0.00, 0.24, 880.00, 0.40), (0.12, 0.28, 1_318.51, 0.34)],
+        )),
+        "builtin-soft-bell" => Some(wav_bytes(
+            1.20,
+            &[(0.00, 1.15, 659.25, 0.31), (0.00, 0.85, 987.77, 0.16)],
+        )),
+        _ => None,
+    }
+}
+
+fn custom_sound_path(app: &AppHandle, sound: &CustomSoundCueManifest) -> Result<PathBuf, String> {
+    let file_name = Path::new(&sound.file_name);
+    if file_name.file_name().and_then(|name| name.to_str()) != Some(sound.file_name.as_str()) {
+        return Err("Invalid stored sound file name".to_string());
+    }
+    Ok(sounds_directory(app)?.join(file_name))
+}
+
+fn sound_cue_bytes(app: &AppHandle, id: &str) -> Result<(Vec<u8>, &'static str), String> {
+    if let Some(bytes) = builtin_sound_bytes(id) {
+        return Ok((bytes, "audio/wav"));
+    }
+
+    let sound = read_custom_sound_manifest(app)
+        .into_iter()
+        .find(|sound| sound.id == id)
+        .ok_or_else(|| "Sound cue not found".to_string())?;
+    let path = custom_sound_path(app, &sound)?;
+    let (_, mime) = sound_file_format(&sound.file_name)
+        .ok_or_else(|| "Stored sound format is not supported".to_string())?;
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    validate_sound_file(&sound.file_name, &bytes)?;
+    Ok((bytes, mime))
+}
+
+#[cfg(target_os = "windows")]
+fn sound_cue_path(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
+    if let Some(bytes) = builtin_sound_bytes(id) {
+        let directory = sounds_directory(app)?.join("built-in");
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        let path = directory.join(format!("{id}.wav"));
+        if !path.is_file() {
+            fs::write(&path, bytes).map_err(|error| error.to_string())?;
+        }
+        return Ok(path);
+    }
+
+    let sound = read_custom_sound_manifest(app)
+        .into_iter()
+        .find(|sound| sound.id == id)
+        .ok_or_else(|| "Sound cue not found".to_string())?;
+    custom_sound_path(app, &sound)
+}
+
+#[tauri::command]
+fn list_sound_cues(app: AppHandle) -> Result<Vec<SoundCueSummary>, String> {
+    let mut sounds = builtin_sound_cues();
+    for sound in read_custom_sound_manifest(&app) {
+        let path = custom_sound_path(&app, &sound)?;
+        let Some((extension, _)) = sound_file_format(&sound.file_name) else {
+            continue;
+        };
+        if path.is_file() {
+            sounds.push(SoundCueSummary {
+                id: sound.id,
+                name: sound.name,
+                is_builtin: false,
+                format: extension.to_ascii_uppercase(),
+            });
+        }
+    }
+    Ok(sounds)
+}
+
+#[tauri::command]
+fn import_sound_cue(
+    app: AppHandle,
+    name: String,
+    file_name: String,
+    bytes: Vec<u8>,
+) -> Result<SoundCueSummary, String> {
+    let name: String = name.trim().chars().take(48).collect();
+    if name.is_empty() {
+        return Err("Sound cue name is required".to_string());
+    }
+    let (extension, _) = validate_sound_file(&file_name, &bytes)?;
+    let id = format!(
+        "custom-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let stored_file_name = format!("{id}.{extension}");
+    let directory = sounds_directory(&app)?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    fs::write(directory.join(&stored_file_name), bytes).map_err(|error| error.to_string())?;
+
+    let mut manifest = read_custom_sound_manifest(&app);
+    manifest.push(CustomSoundCueManifest {
+        id: id.clone(),
+        name: name.clone(),
+        file_name: stored_file_name,
+        imported_at: current_time_millis(),
+    });
+    persist_custom_sound_manifest(&app, &manifest)?;
+
+    Ok(SoundCueSummary {
+        id,
+        name,
+        is_builtin: false,
+        format: extension.to_ascii_uppercase(),
+    })
+}
+
+#[tauri::command]
+fn delete_sound_cue(
+    app: AppHandle,
+    reminders: State<'_, ReminderRepository>,
+    id: String,
+) -> Result<(), String> {
+    if !id.starts_with("custom-") {
+        return Err("Built-in sound cues cannot be deleted".to_string());
+    }
+    let mut manifest = read_custom_sound_manifest(&app);
+    let index = manifest
+        .iter()
+        .position(|sound| sound.id == id)
+        .ok_or_else(|| "Sound cue not found".to_string())?;
+    let sound = manifest.remove(index);
+    let path = custom_sound_path(&app, &sound)?;
+    if path.is_file() {
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    persist_custom_sound_manifest(&app, &manifest)?;
+
+    let mut saved_reminders = reminders
+        .reminders
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut changed = false;
+    for reminder in saved_reminders
+        .iter_mut()
+        .filter(|reminder| reminder.sound_cue_id == id)
+    {
+        reminder.sound_enabled = false;
+        reminder.sound_cue_id = default_sound_cue_id();
+        changed = true;
+    }
+    if changed {
+        persist_reminders(&reminders, &saved_reminders)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_sound_cue_data_url(app: AppHandle, id: String) -> Result<String, String> {
+    let (bytes, mime) = sound_cue_bytes(&app, &id)?;
+    Ok(format!(
+        "data:{mime};base64,{}",
+        BASE64_STANDARD.encode(bytes)
+    ))
 }
 
 fn resolve_active_character_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1016,6 +1402,8 @@ fn spawn_reminder_scheduler(
                                 reminder.message.clone(),
                                 reminder.animation.clone(),
                                 reminder.visible_for_seconds,
+                                reminder.sound_enabled,
+                                reminder.sound_cue_id.clone(),
                             ));
                             reminder.next_run_at = now.saturating_add(interval);
                         }
@@ -1030,23 +1418,30 @@ fn spawn_reminder_scheduler(
             }
         }
 
-        for (title, message, animation, visible_for_seconds) in due_reminders {
+        for (
+            title,
+            message,
+            animation,
+            visible_for_seconds,
+            reminder_sound_enabled,
+            sound_cue_id,
+        ) in due_reminders
+        {
             let settings = pet_settings
                 .settings
                 .lock()
                 .map(|settings| settings.clone())
-                .unwrap_or(PetSettings {
-                    pet_size: DEFAULT_PET_SIZE,
-                    bubble_style: default_bubble_style(),
-                    active_character_id: default_character_id(),
-                    dark_mode: false,
-                });
+                .unwrap_or_else(|_| default_pet_settings());
+            let sound_cue_id =
+                (settings.sound_enabled && reminder_sound_enabled).then_some(sound_cue_id);
             show_scheduled_reminder(
                 app.clone(),
                 title,
                 message,
                 animation,
                 visible_for_seconds,
+                sound_cue_id,
+                settings.sound_volume,
                 settings.pet_size,
                 settings.bubble_style,
             );
@@ -1061,6 +1456,8 @@ fn show_scheduled_reminder(
     message: String,
     animation: String,
     visible_for_seconds: u32,
+    sound_cue_id: Option<String>,
+    sound_volume: u8,
     pet_size: u32,
     bubble_style: String,
 ) {
@@ -1075,6 +1472,8 @@ fn show_scheduled_reminder(
             pet_size,
             bubble_style,
             Some(animation),
+            sound_cue_id,
+            Some(sound_volume),
         )
         .await;
     });
@@ -1143,6 +1542,25 @@ fn set_dark_mode(
 }
 
 #[tauri::command]
+fn set_sound_settings(
+    repository: State<'_, PetSettingsRepository>,
+    sound_enabled: bool,
+    sound_volume: u8,
+) -> Result<PetSettings, String> {
+    let updated = {
+        let mut settings = repository
+            .settings
+            .lock()
+            .map_err(|error| error.to_string())?;
+        settings.sound_enabled = sound_enabled;
+        settings.sound_volume = sound_volume.min(100);
+        settings.clone()
+    };
+    persist_pet_settings(&repository)?;
+    Ok(updated)
+}
+
+#[tauri::command]
 fn list_reminders(repository: State<'_, ReminderRepository>) -> Result<Vec<Reminder>, String> {
     repository
         .reminders
@@ -1160,6 +1578,8 @@ fn create_reminder(
     interval_unit: String,
     animation: String,
     visible_for_seconds: u32,
+    sound_enabled: bool,
+    sound_cue_id: String,
 ) -> Result<Reminder, String> {
     let interval = reminder_interval_millis(interval_value, &interval_unit)?;
     let title: String = title.trim().chars().take(80).collect();
@@ -1185,6 +1605,8 @@ fn create_reminder(
         interval_unit,
         animation: normalize_reminder_animation(&animation),
         visible_for_seconds: normalize_reminder_visible_for_seconds(visible_for_seconds),
+        sound_enabled,
+        sound_cue_id: normalize_sound_cue_id(&sound_cue_id),
         enabled: true,
         next_run_at: now.saturating_add(interval),
     };
@@ -1208,6 +1630,8 @@ fn update_reminder(
     interval_unit: String,
     animation: String,
     visible_for_seconds: u32,
+    sound_enabled: bool,
+    sound_cue_id: String,
 ) -> Result<Reminder, String> {
     let interval = reminder_interval_millis(interval_value, &interval_unit)?;
     let title: String = title.trim().chars().take(80).collect();
@@ -1235,6 +1659,8 @@ fn update_reminder(
     reminder.interval_unit = interval_unit;
     reminder.animation = normalize_reminder_animation(&animation);
     reminder.visible_for_seconds = normalize_reminder_visible_for_seconds(visible_for_seconds);
+    reminder.sound_enabled = sound_enabled;
+    reminder.sound_cue_id = normalize_sound_cue_id(&sound_cue_id);
     if reminder.enabled && schedule_changed {
         reminder.next_run_at = current_time_millis().saturating_add(interval);
     }
@@ -1320,18 +1746,17 @@ fn trigger_reminder_now(
         .settings
         .lock()
         .map(|settings| settings.clone())
-        .unwrap_or(PetSettings {
-            pet_size: DEFAULT_PET_SIZE,
-            bubble_style: default_bubble_style(),
-            active_character_id: default_character_id(),
-            dark_mode: false,
-        });
+        .unwrap_or_else(|_| default_pet_settings());
+    let sound_cue_id =
+        (settings.sound_enabled && reminder.sound_enabled).then_some(reminder.sound_cue_id);
     show_scheduled_reminder(
         app,
         reminder.title,
         reminder.message,
         reminder.animation,
         reminder.visible_for_seconds,
+        sound_cue_id,
+        settings.sound_volume,
         settings.pet_size,
         settings.bubble_style,
     );
@@ -1632,6 +2057,8 @@ struct NativePetContent {
 #[cfg(target_os = "macos")]
 static NATIVE_PET: Mutex<Option<NativePet>> = Mutex::new(None);
 #[cfg(target_os = "macos")]
+static NATIVE_SOUND: Mutex<Option<usize>> = Mutex::new(None);
+#[cfg(target_os = "macos")]
 static LAST_PET_POSITION: Mutex<Option<(CGFloat, CGFloat)>> = Mutex::new(None);
 #[cfg(not(target_os = "macos"))]
 static LAST_PET_POSITION: Mutex<Option<(i32, i32)>> = Mutex::new(None);
@@ -1663,6 +2090,54 @@ fn native_bubble_height(message: &str) -> CGFloat {
         .sum::<usize>()
         .clamp(1, 12);
     (54.0 + wrapped_lines as CGFloat * 19.0).clamp(MIN_BUBBLE_HEIGHT, MAX_BUBBLE_HEIGHT)
+}
+
+#[cfg(target_os = "macos")]
+fn play_native_sound(app: &AppHandle, sound_cue_id: &str, volume: u8) -> Result<(), String> {
+    let (bytes, _) = sound_cue_bytes(app, sound_cue_id)?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || unsafe {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject, Bool};
+
+        let result = (|| {
+            let data_class =
+                AnyClass::get("NSData").ok_or_else(|| "NSData not found".to_string())?;
+            let data: *mut AnyObject = msg_send![
+                data_class,
+                dataWithBytes: bytes.as_ptr(),
+                length: bytes.len()
+            ];
+            let sound_class =
+                AnyClass::get("NSSound").ok_or_else(|| "NSSound not found".to_string())?;
+            let sound_alloc: *mut AnyObject = msg_send![sound_class, alloc];
+            let sound: *mut AnyObject = msg_send![sound_alloc, initWithData: data];
+            if sound.is_null() {
+                return Err("macOS could not decode this sound cue".to_string());
+            }
+
+            let _: () = msg_send![sound, setVolume: volume.min(100) as f32 / 100.0];
+            let played: Bool = msg_send![sound, play];
+            if played.is_false() {
+                let _: () = msg_send![sound, release];
+                return Err("macOS could not play this sound cue".to_string());
+            }
+
+            if let Ok(mut active_sound) = NATIVE_SOUND.lock() {
+                if let Some(previous) = active_sound.replace(sound as usize) {
+                    let previous = previous as *mut AnyObject;
+                    let _: () = msg_send![previous, stop];
+                    let _: () = msg_send![previous, release];
+                }
+            }
+            Ok(())
+        })();
+        let _ = tx.send(result);
+    })
+    .map_err(|error| error.to_string())?;
+
+    rx.recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "Timed out starting the sound cue".to_string())?
 }
 
 #[cfg(target_os = "macos")]
@@ -2642,6 +3117,35 @@ fn macos_overlay_window_level() -> isize {
     unsafe { CGWindowLevelForKey(K_CG_ASSISTIVE_TECH_HIGH_WINDOW_LEVEL_KEY) as isize }
 }
 
+#[cfg(target_os = "windows")]
+fn windows_mci_command(command: &str) -> Result<(), String> {
+    let command = command
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let result = unsafe { mciSendStringW(command.as_ptr(), std::ptr::null_mut(), 0, 0) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(format!("Windows audio command failed with code {result}"))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn play_windows_sound(app: &AppHandle, sound_cue_id: &str, volume: u8) -> Result<(), String> {
+    let path = sound_cue_path(app, sound_cue_id)?;
+    let _ = windows_mci_command("close baalert_sound");
+    windows_mci_command(&format!(
+        "open \"{}\" alias baalert_sound",
+        path.to_string_lossy()
+    ))?;
+    windows_mci_command(&format!(
+        "setaudio baalert_sound volume to {}",
+        volume.min(100) as u32 * 10
+    ))?;
+    windows_mci_command("play baalert_sound from 0")
+}
+
 #[tauri::command]
 async fn show_pet(
     app: AppHandle,
@@ -2653,9 +3157,14 @@ async fn show_pet(
     pet_size: u32,
     bubble_style: String,
     reminder_animation: Option<String>,
+    sound_cue_id: Option<String>,
+    sound_volume: Option<u8>,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
+        if let Some(sound_cue_id) = sound_cue_id.as_deref() {
+            let _ = play_native_sound(&app, sound_cue_id, sound_volume.unwrap_or(70));
+        }
         return show_native_pet(
             app,
             title.unwrap_or_else(|| "Baalert reminder".to_string()),
@@ -2671,6 +3180,17 @@ async fn show_pet(
 
     #[cfg(not(target_os = "macos"))]
     {
+        #[cfg(target_os = "windows")]
+        if let Some(sound_cue_id) = sound_cue_id.as_deref() {
+            let _ = play_windows_sound(&app, sound_cue_id, sound_volume.unwrap_or(70));
+        }
+
+        #[cfg(target_os = "windows")]
+        let sound_data_url = None;
+        #[cfg(not(target_os = "windows"))]
+        let sound_data_url = sound_cue_id
+            .as_deref()
+            .and_then(|id| get_sound_cue_data_url(app.clone(), id.to_string()).ok());
         let pet_size = pet_size.clamp(MIN_PET_SIZE, MAX_PET_SIZE);
         let title: String = title
             .unwrap_or_else(|| "Baalert reminder".to_string())
@@ -2702,6 +3222,8 @@ async fn show_pet(
                 .as_deref()
                 .map(normalize_reminder_animation)
                 .unwrap_or_else(default_reminder_animation),
+            sound_data_url,
+            sound_volume: sound_volume.unwrap_or(70).min(100),
             dark_mode,
         };
 
@@ -2854,6 +3376,11 @@ pub fn run() {
             set_pet_size,
             set_bubble_style,
             set_dark_mode,
+            set_sound_settings,
+            list_sound_cues,
+            import_sound_cue,
+            delete_sound_cue,
+            get_sound_cue_data_url,
             list_characters,
             create_character,
             add_character_animation,
@@ -2911,6 +3438,51 @@ mod tests {
         .unwrap();
         assert_eq!(reminder.animation, "idle");
         assert_eq!(reminder.visible_for_seconds, 10);
+        assert!(!reminder.sound_enabled);
+        assert_eq!(reminder.sound_cue_id, DEFAULT_SOUND_CUE_ID);
+    }
+
+    #[test]
+    fn migrates_existing_pet_settings_to_sound_defaults() {
+        let settings: PetSettings = serde_json::from_str(
+            r#"{
+                "petSize": 152,
+                "bubbleStyle": "pink",
+                "activeCharacterId": "builtin-baalert",
+                "darkMode": true
+            }"#,
+        )
+        .unwrap();
+        assert!(settings.sound_enabled);
+        assert_eq!(settings.sound_volume, 70);
+    }
+
+    #[test]
+    fn normalizes_sound_cue_ids() {
+        assert_eq!(
+            normalize_sound_cue_id("builtin-bright-pop"),
+            "builtin-bright-pop"
+        );
+        assert_eq!(normalize_sound_cue_id("custom-123"), "custom-123");
+        assert_eq!(normalize_sound_cue_id("../sound"), DEFAULT_SOUND_CUE_ID);
+    }
+
+    #[test]
+    fn builds_valid_builtin_wav_cues() {
+        for cue in builtin_sound_cues() {
+            let bytes = builtin_sound_bytes(&cue.id).unwrap();
+            assert!(bytes.starts_with(b"RIFF"));
+            assert_eq!(bytes.get(8..12), Some(b"WAVE".as_slice()));
+            assert!(bytes.len() > 44);
+            assert!(validate_sound_file("cue.wav", &bytes).is_ok());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_local_sound_files() {
+        assert!(validate_sound_file("cue.ogg", b"OggS").is_err());
+        assert!(validate_sound_file("cue.mp3", b"not an mp3").is_err());
+        assert!(validate_sound_file("cue.wav", b"RIFFbad data").is_err());
     }
 
     #[test]

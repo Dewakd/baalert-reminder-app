@@ -25,6 +25,8 @@ type PetOverlayPayload = {
   petSize: number;
   bubbleStyle: BubbleStyle;
   reminderAnimation: string;
+  soundDataUrl: string | null;
+  soundVolume: number;
   darkMode: boolean;
 };
 
@@ -61,6 +63,8 @@ const DEFAULT_PET_OVERLAY: PetOverlayPayload = {
   petSize: 152,
   bubbleStyle: "lime",
   reminderAnimation: "idle",
+  soundDataUrl: null,
+  soundVolume: 70,
   darkMode: false,
 };
 
@@ -97,6 +101,17 @@ function normalizePetOverlayPayload(
         ? 0
         : Math.min(3600, Math.max(2, visibleForSeconds || 10)),
     bubbleStyle,
+    soundDataUrl:
+      typeof parsed.soundDataUrl === "string" ? parsed.soundDataUrl : null,
+    soundVolume: Math.min(
+      100,
+      Math.max(
+        0,
+        parsed.soundVolume === undefined
+          ? DEFAULT_PET_OVERLAY.soundVolume
+          : Number(parsed.soundVolume) || 0,
+      ),
+    ),
   };
 }
 
@@ -247,6 +262,18 @@ function PetOverlay() {
       unlisten?.();
     };
   }, [appWindow]);
+
+  useEffect(() => {
+    if (!payload.soundDataUrl || payload.soundVolume <= 0) return;
+
+    const audio = new Audio(payload.soundDataUrl);
+    audio.volume = payload.soundVolume / 100;
+    void audio.play().catch(() => undefined);
+    return () => {
+      audio.pause();
+      audio.src = "";
+    };
+  }, [payload.revision, payload.soundDataUrl, payload.soundVolume]);
 
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -586,6 +613,8 @@ type Reminder = {
   intervalUnit: "minutes" | "hours";
   animation: string;
   visibleForSeconds: number;
+  soundEnabled: boolean;
+  soundCueId: string;
   enabled: boolean;
   nextRunAt: number;
 };
@@ -597,7 +626,53 @@ type PetSettings = {
   bubbleStyle: BubbleStyle;
   activeCharacterId: string;
   darkMode: boolean;
+  soundEnabled: boolean;
+  soundVolume: number;
 };
+
+type SoundCue = {
+  id: string;
+  name: string;
+  isBuiltin: boolean;
+  format: string;
+};
+
+type SoundCueImport = {
+  name: string;
+  fileName: string;
+  bytes: number[];
+};
+
+const BUILTIN_SOUND_CUES: SoundCue[] = [
+  {
+    id: "builtin-gentle-chime",
+    name: "Gentle Chime",
+    isBuiltin: true,
+    format: "WAV",
+  },
+  {
+    id: "builtin-bright-pop",
+    name: "Bright Pop",
+    isBuiltin: true,
+    format: "WAV",
+  },
+  {
+    id: "builtin-soft-bell",
+    name: "Soft Bell",
+    isBuiltin: true,
+    format: "WAV",
+  },
+];
+
+async function playSoundCuePreview(soundCueId: string, volume: number) {
+  const dataUrl = await invoke<string>("get_sound_cue_data_url", {
+    id: soundCueId,
+  });
+  const audio = new Audio(dataUrl);
+  audio.volume = Math.min(100, Math.max(0, volume)) / 100;
+  await audio.play();
+  return audio;
+}
 
 type CharacterAnimation = {
   id: string;
@@ -737,9 +812,13 @@ function AnimationPreview({
 function RemindersPage({
   onRemindersChange,
   animations,
+  soundCues,
+  soundVolume,
 }: {
   onRemindersChange: (reminders: Reminder[]) => void;
   animations: CharacterAnimation[];
+  soundCues: SoundCue[];
+  soundVolume: number;
 }) {
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [title, setTitle] = useState("");
@@ -750,6 +829,8 @@ function RemindersPage({
   );
   const [animation, setAnimation] = useState("idle");
   const [visibleForSeconds, setVisibleForSeconds] = useState(10);
+  const [soundEnabled, setSoundEnabled] = useState(false);
+  const [soundCueId, setSoundCueId] = useState("builtin-gentle-chime");
   const [busy, setBusy] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [animationUpdatingId, setAnimationUpdatingId] = useState<string | null>(
@@ -758,6 +839,8 @@ function RemindersPage({
   const [previewingAnimation, setPreviewingAnimation] = useState<string | null>(
     null,
   );
+  const [previewingSoundCue, setPreviewingSoundCue] = useState(false);
+  const soundPreview = useRef<HTMLAudioElement | null>(null);
   const [animationPreview, setAnimationPreview] = useState<{
     name: string;
     frames: string[];
@@ -803,6 +886,19 @@ function RemindersPage({
     }
   }, [animations, animation]);
 
+  useEffect(() => {
+    if (!soundCues.some((item) => item.id === soundCueId)) {
+      setSoundCueId(soundCues[0]?.id ?? "builtin-gentle-chime");
+    }
+  }, [soundCues, soundCueId]);
+
+  useEffect(
+    () => () => {
+      soundPreview.current?.pause();
+    },
+    [],
+  );
+
   function selectUnit(unit: "minutes" | "hours") {
     setIntervalUnit(unit);
     setIntervalValue((current) => Math.min(current, unit === "minutes" ? 60 : 24));
@@ -815,6 +911,8 @@ function RemindersPage({
     setIntervalUnit("minutes");
     setAnimation(animations[0]?.id ?? "idle");
     setVisibleForSeconds(10);
+    setSoundEnabled(false);
+    setSoundCueId(soundCues[0]?.id ?? "builtin-gentle-chime");
     setEditingId(null);
     setError("");
     setEditorOpen(true);
@@ -827,6 +925,8 @@ function RemindersPage({
     setIntervalUnit(reminder.intervalUnit);
     setAnimation(reminder.animation);
     setVisibleForSeconds(reminder.visibleForSeconds);
+    setSoundEnabled(reminder.soundEnabled);
+    setSoundCueId(reminder.soundCueId);
     setEditingId(reminder.id);
     setError("");
     setEditorOpen(true);
@@ -853,6 +953,8 @@ function RemindersPage({
         intervalUnit,
         animation,
         visibleForSeconds,
+        soundEnabled,
+        soundCueId,
       });
       updateReminderState((current) =>
         editingId
@@ -934,6 +1036,19 @@ function RemindersPage({
       setError(String(reason));
     } finally {
       setPreviewingAnimation(null);
+    }
+  }
+
+  async function handleSoundPreview() {
+    setPreviewingSoundCue(true);
+    setError("");
+    try {
+      soundPreview.current?.pause();
+      soundPreview.current = await playSoundCuePreview(soundCueId, soundVolume);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setPreviewingSoundCue(false);
     }
   }
 
@@ -1050,6 +1165,16 @@ function RemindersPage({
                       : "Preview"}
                   </button>
                 </div>
+              </div>
+
+              <div className="reminder-sound-row">
+                <span>Sound cue</span>
+                <strong>
+                  {reminder.soundEnabled
+                    ? (soundCues.find((cue) => cue.id === reminder.soundCueId)
+                        ?.name ?? "Unavailable sound")
+                    : "Off"}
+                </strong>
               </div>
 
               <div className="reminder-item-footer">
@@ -1221,6 +1346,42 @@ function RemindersPage({
                   ))}
                 </select>
               </label>
+
+              <div className="reminder-field">
+                <span>Sound cue</span>
+                <div className="reminder-sound-picker">
+                  <label
+                    className="compact-toggle"
+                    title={soundEnabled ? "Disable sound cue" : "Enable sound cue"}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={soundEnabled}
+                      onChange={(event) => setSoundEnabled(event.target.checked)}
+                    />
+                    <span />
+                  </label>
+                  <select
+                    aria-label="Reminder sound cue"
+                    value={soundCueId}
+                    disabled={!soundEnabled}
+                    onChange={(event) => setSoundCueId(event.target.value)}
+                  >
+                    {soundCues.map((cue) => (
+                      <option value={cue.id} key={cue.id}>
+                        {cue.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    disabled={!soundEnabled || previewingSoundCue}
+                    onClick={() => void handleSoundPreview()}
+                  >
+                    {previewingSoundCue ? "Playing..." : "Preview"}
+                  </button>
+                </div>
+              </div>
 
               {error && <div className="reminder-error">{error}</div>}
 
@@ -1395,6 +1556,11 @@ function AppUpdateTool() {
 function SettingsPage({
   petSize,
   bubbleStyle,
+  soundEnabled,
+  soundVolume,
+  soundCues,
+  soundBusy,
+  soundError,
   characters,
   activeCharacterId,
   characterBusy,
@@ -1402,6 +1568,9 @@ function SettingsPage({
   onPetSizePreview,
   onPetSizeCommit,
   onBubbleStyleChange,
+  onSoundSettingsChange,
+  onSoundImport,
+  onSoundDelete,
   onCharacterCreate,
   onCharacterAnimationAdd,
   onCharacterAnimationDelete,
@@ -1410,6 +1579,11 @@ function SettingsPage({
 }: {
   petSize: number;
   bubbleStyle: BubbleStyle;
+  soundEnabled: boolean;
+  soundVolume: number;
+  soundCues: SoundCue[];
+  soundBusy: boolean;
+  soundError: string;
   characters: CharacterPack[];
   activeCharacterId: string;
   characterBusy: boolean;
@@ -1417,6 +1591,9 @@ function SettingsPage({
   onPetSizePreview: (size: number) => void;
   onPetSizeCommit: (size: number) => void;
   onBubbleStyleChange: (style: BubbleStyle) => void;
+  onSoundSettingsChange: (enabled: boolean, volume: number) => Promise<void>;
+  onSoundImport: (sound: SoundCueImport) => Promise<void>;
+  onSoundDelete: (soundCueId: string) => Promise<void>;
   onCharacterCreate: (name: string) => Promise<void>;
   onCharacterAnimationAdd: (
     characterId: string,
@@ -1432,6 +1609,8 @@ function SettingsPage({
 }) {
   const previewSize = Math.round(petSize * 0.72);
   const animationInputRef = useRef<HTMLInputElement>(null);
+  const soundInputRef = useRef<HTMLInputElement>(null);
+  const soundPreview = useRef<HTMLAudioElement | null>(null);
   const [animationUploadTarget, setAnimationUploadTarget] = useState<{
     characterId: string;
     animation: string;
@@ -1446,6 +1625,11 @@ function SettingsPage({
   const [localImportError, setLocalImportError] = useState("");
   const [previewingCharacterAnimation, setPreviewingCharacterAnimation] =
     useState<string | null>(null);
+  const [previewingSoundCueId, setPreviewingSoundCueId] = useState<string | null>(
+    null,
+  );
+  const [localSoundError, setLocalSoundError] = useState("");
+  const [draftSoundVolume, setDraftSoundVolume] = useState(soundVolume);
   const [characterAnimationPreview, setCharacterAnimationPreview] = useState<{
     name: string;
     frames: string[];
@@ -1453,6 +1637,49 @@ function SettingsPage({
   const activeCharacter =
     characters.find((character) => character.id === activeCharacterId) ??
     characters[0];
+
+  useEffect(
+    () => () => {
+      soundPreview.current?.pause();
+    },
+    [],
+  );
+
+  useEffect(() => setDraftSoundVolume(soundVolume), [soundVolume]);
+
+  async function handleSoundPreview(soundCueId: string) {
+    setPreviewingSoundCueId(soundCueId);
+    setLocalSoundError("");
+    try {
+      soundPreview.current?.pause();
+      soundPreview.current = await playSoundCuePreview(
+        soundCueId,
+        draftSoundVolume,
+      );
+    } catch (reason) {
+      setLocalSoundError(String(reason));
+    } finally {
+      setPreviewingSoundCueId(null);
+    }
+  }
+
+  async function handleSoundFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    setLocalSoundError("");
+    try {
+      const name = file.name.replace(/\.[^.]+$/, "").trim() || "Custom cue";
+      await onSoundImport({
+        name,
+        fileName: file.name,
+        bytes: Array.from(new Uint8Array(await file.arrayBuffer())),
+      });
+    } catch (reason) {
+      setLocalSoundError(String(reason));
+    }
+  }
 
   async function handleCreateCharacter(event: React.FormEvent) {
     event.preventDefault();
@@ -1701,6 +1928,133 @@ function SettingsPage({
               </span>
               <b>{bubbleStyle === style.id ? "Selected" : "Choose"}</b>
             </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="sound-settings-tool">
+        <div className="reminder-section-heading sound-settings-heading">
+          <div>
+            <h2>Sound cues</h2>
+            <p>Play a cue with reminders that have sound enabled.</p>
+          </div>
+          <div className="toggle-wrapper">
+            <span className={`toggle-label ${soundEnabled ? "on" : ""}`}>
+              {soundEnabled ? "ON" : "OFF"}
+            </span>
+            <label className="toggle" title="Toggle all reminder sounds">
+              <input
+                type="checkbox"
+                checked={soundEnabled}
+                onChange={(event) =>
+                  void onSoundSettingsChange(
+                    event.target.checked,
+                    draftSoundVolume,
+                  )
+                }
+              />
+              <span className="toggle-track" />
+              <span className="toggle-thumb" />
+            </label>
+          </div>
+        </div>
+
+        <div className="sound-volume-control">
+          <div>
+            <strong>Volume</strong>
+            <span>{draftSoundVolume}%</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={draftSoundVolume}
+            disabled={!soundEnabled}
+            aria-label="Sound cue volume"
+            onChange={(event) => setDraftSoundVolume(Number(event.target.value))}
+            onPointerUp={(event) =>
+              void onSoundSettingsChange(
+                soundEnabled,
+                Number(event.currentTarget.value),
+              )
+            }
+            onKeyUp={(event) =>
+              void onSoundSettingsChange(
+                soundEnabled,
+                Number(event.currentTarget.value),
+              )
+            }
+            onBlur={(event) =>
+              void onSoundSettingsChange(
+                soundEnabled,
+                Number(event.currentTarget.value),
+              )
+            }
+          />
+        </div>
+
+        <div className="sound-library-heading">
+          <div>
+            <strong>Sound library</strong>
+            <span>{soundCues.length} cues available</span>
+          </div>
+          <button
+            type="button"
+            disabled={soundBusy}
+            onClick={() => soundInputRef.current?.click()}
+          >
+            {soundBusy ? "Importing..." : "+ Add local sound"}
+          </button>
+          <input
+            ref={soundInputRef}
+            type="file"
+            accept=".mp3,.wav,audio/mpeg,audio/wav"
+            hidden
+            onChange={(event) => void handleSoundFile(event)}
+          />
+        </div>
+
+        {(localSoundError || soundError) && (
+          <div className="reminder-error">{localSoundError || soundError}</div>
+        )}
+
+        <div className="sound-cue-grid">
+          {soundCues.map((cue) => (
+            <article className="sound-cue-item" key={cue.id}>
+              <div className="sound-cue-symbol" aria-hidden="true">
+                {cue.isBuiltin ? "♪" : "+"}
+              </div>
+              <div>
+                <strong>{cue.name}</strong>
+                <span>
+                  {cue.isBuiltin ? "Built in" : "Local"} · {cue.format}
+                </span>
+              </div>
+              <button
+                type="button"
+                disabled={previewingSoundCueId !== null || soundVolume === 0}
+                onClick={() => void handleSoundPreview(cue.id)}
+              >
+                {previewingSoundCueId === cue.id ? "Playing..." : "Preview"}
+              </button>
+              {!cue.isBuiltin && (
+                <button
+                  className="delete-sound-cue"
+                  type="button"
+                  title={`Delete ${cue.name}`}
+                  aria-label={`Delete ${cue.name}`}
+                  disabled={soundBusy}
+                  onClick={() => {
+                    if (window.confirm(`Delete ${cue.name}?`)) {
+                      void onSoundDelete(cue.id);
+                    }
+                  }}
+                >
+                  x
+                </button>
+              )}
+            </article>
           ))}
         </div>
       </section>
@@ -2217,6 +2571,11 @@ function Dashboard() {
   const [petSize, setPetSize] = useState(152);
   const [bubbleStyle, setBubbleStyle] = useState<BubbleStyle>("lime");
   const [darkMode, setDarkMode] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [soundVolume, setSoundVolume] = useState(70);
+  const [soundCues, setSoundCues] = useState<SoundCue[]>(BUILTIN_SOUND_CUES);
+  const [soundBusy, setSoundBusy] = useState(false);
+  const [soundError, setSoundError] = useState("");
   const [activeCharacterId, setActiveCharacterId] = useState(
     "builtin-baalert",
   );
@@ -2235,16 +2594,20 @@ function Dashboard() {
   useEffect(() => {
     async function loadDashboardState() {
       try {
-        const [settings, reminders, petVisible, savedCharacters] =
+        const [settings, reminders, petVisible, savedCharacters, savedSoundCues] =
           await Promise.all([
-          invoke<PetSettings>("get_pet_settings"),
-          invoke<Reminder[]>("list_reminders"),
-          invoke<boolean>("is_pet_visible"),
+            invoke<PetSettings>("get_pet_settings"),
+            invoke<Reminder[]>("list_reminders"),
+            invoke<boolean>("is_pet_visible"),
             invoke<CharacterPack[]>("list_characters"),
+            invoke<SoundCue[]>("list_sound_cues"),
           ]);
         setPetSize(settings.petSize);
         setBubbleStyle(settings.bubbleStyle);
         setDarkMode(settings.darkMode);
+        setSoundEnabled(settings.soundEnabled);
+        setSoundVolume(settings.soundVolume);
+        setSoundCues(savedSoundCues);
         setActiveCharacterId(settings.activeCharacterId);
         setCharacters(savedCharacters);
         setDashboardReminders(reminders);
@@ -2306,6 +2669,8 @@ function Dashboard() {
           petSize,
           bubbleStyle,
           reminderAnimation: null,
+          soundCueId: null,
+          soundVolume: null,
         });
       } else {
         await invoke("hide_pet");
@@ -2334,6 +2699,8 @@ function Dashboard() {
           petSize: settings.petSize,
           bubbleStyle,
           reminderAnimation: null,
+          soundCueId: null,
+          soundVolume: null,
         });
       }
     } catch (err) {
@@ -2366,6 +2733,58 @@ function Dashboard() {
     }
   }
 
+  async function handleSoundSettingsChange(enabled: boolean, volume: number) {
+    setSoundEnabled(enabled);
+    setSoundVolume(volume);
+    setSoundError("");
+    try {
+      const settings = await invoke<PetSettings>("set_sound_settings", {
+        soundEnabled: enabled,
+        soundVolume: volume,
+      });
+      setSoundEnabled(settings.soundEnabled);
+      setSoundVolume(settings.soundVolume);
+    } catch (reason) {
+      setSoundError(String(reason));
+    }
+  }
+
+  async function refreshSoundCues() {
+    setSoundCues(await invoke<SoundCue[]>("list_sound_cues"));
+  }
+
+  async function handleSoundImport(sound: SoundCueImport) {
+    setSoundBusy(true);
+    setSoundError("");
+    try {
+      await invoke<SoundCue>("import_sound_cue", sound);
+      await refreshSoundCues();
+    } catch (reason) {
+      const message = String(reason);
+      setSoundError(message);
+      throw new Error(message);
+    } finally {
+      setSoundBusy(false);
+    }
+  }
+
+  async function handleSoundDelete(soundCueId: string) {
+    setSoundBusy(true);
+    setSoundError("");
+    try {
+      await invoke("delete_sound_cue", { id: soundCueId });
+      const [, reminders] = await Promise.all([
+        refreshSoundCues(),
+        invoke<Reminder[]>("list_reminders"),
+      ]);
+      setDashboardReminders(reminders);
+    } catch (reason) {
+      setSoundError(String(reason));
+    } finally {
+      setSoundBusy(false);
+    }
+  }
+
   async function relaunchActivePet() {
     if (!petActive) return;
     await invoke("show_pet", {
@@ -2377,6 +2796,8 @@ function Dashboard() {
       petSize,
       bubbleStyle,
       reminderAnimation: null,
+      soundCueId: null,
+      soundVolume: null,
     });
   }
 
@@ -2743,6 +3164,8 @@ function Dashboard() {
               animations={
                 activeCharacter?.animations ?? BUILTIN_CHARACTER.animations
               }
+              soundCues={soundCues}
+              soundVolume={soundVolume}
             />
           )}
 
@@ -2750,6 +3173,11 @@ function Dashboard() {
             <SettingsPage
               petSize={petSize}
               bubbleStyle={bubbleStyle}
+              soundEnabled={soundEnabled}
+              soundVolume={soundVolume}
+              soundCues={soundCues}
+              soundBusy={soundBusy}
+              soundError={soundError}
               characters={characters}
               activeCharacterId={activeCharacterId}
               characterBusy={characterBusy}
@@ -2759,6 +3187,9 @@ function Dashboard() {
               onBubbleStyleChange={(style) =>
                 void handleBubbleStyleChange(style)
               }
+              onSoundSettingsChange={handleSoundSettingsChange}
+              onSoundImport={handleSoundImport}
+              onSoundDelete={handleSoundDelete}
               onCharacterCreate={handleCharacterCreate}
               onCharacterAnimationAdd={handleCharacterAnimationAdd}
               onCharacterAnimationDelete={handleCharacterAnimationDelete}
